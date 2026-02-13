@@ -1,0 +1,53 @@
+# 체크포인트 및 모델 파일
+checkpoints/
+*.pth
+*.pt
+
+# 훈련 결과 및 로그
+results/
+runs/
+train/
+val/
+*.xlsx
+*.npz
+
+# TensorBoard 로그
+events.out.tfevents.*
+
+# 데이터셋 폴더
+diffusion_datasets/
+FAKE_IMAGES/
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 임시 파일
+*.tmp
+*.temp
+*.log
+
+# 실험 결과
+*_ypred.npz
+*_ytrue.npz
+baseline_predication_for_pr_roc_curve.pth
