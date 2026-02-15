@@ -6,13 +6,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from dataset.sr_rectify_dataset import SRRectifyDataset
-from models.sr_modules import BasicSRProcessor
 from models.velocity import RectifierUNet
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train SR rectifier: SR(D(x)) -> x")
     parser.add_argument("--img_dir", type=str, required=True, help="Directory with real training images")
+    parser.add_argument("--sr_cache_root", type=str, default=None, help="Optional root of precomputed SR(D(x)) cache")
     parser.add_argument("--save_path", type=str, default="rectifier.pth")
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -33,7 +33,7 @@ def resolve_device(device_arg: str) -> str:
     return device_arg
 
 
-def freeze_sr(sr_processor: BasicSRProcessor):
+def freeze_sr(sr_processor):
     if hasattr(sr_processor, "upsampler") and hasattr(sr_processor.upsampler, "model"):
         for p in sr_processor.upsampler.model.parameters():
             p.requires_grad = False
@@ -43,8 +43,13 @@ def freeze_sr(sr_processor: BasicSRProcessor):
 def main():
     args = parse_args()
     device = resolve_device(args.device)
+    use_sr_cache = args.sr_cache_root is not None
 
-    dataset = SRRectifyDataset(args.img_dir, image_size=args.image_size)
+    dataset = SRRectifyDataset(
+        args.img_dir,
+        image_size=args.image_size,
+        sr_cache_root=args.sr_cache_root,
+    )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -53,13 +58,16 @@ def main():
         pin_memory=(device == "cuda"),
     )
 
-    sr = BasicSRProcessor(
-        scale=args.sr_scale,
-        model_name=args.sr_model_name,
-        device=device,
-        tile=args.sr_tile,
-    )
-    freeze_sr(sr)
+    sr = None
+    if not use_sr_cache:
+        from models.sr_modules import BasicSRProcessor
+        sr = BasicSRProcessor(
+            scale=args.sr_scale,
+            model_name=args.sr_model_name,
+            device=device,
+            tile=args.sr_tile,
+        )
+        freeze_sr(sr)
 
     rectifier = RectifierUNet(c_in=3).to(device)
     optimizer = torch.optim.Adam(rectifier.parameters(), lr=args.lr)
@@ -70,10 +78,15 @@ def main():
         rectifier.train()
         total_loss = 0.0
 
-        for x in loader:
-            x = x.to(device, non_blocking=True)
-            with torch.no_grad():
-                x_sr = sr.sr_process(x)
+        for batch in loader:
+            if use_sr_cache:
+                x, x_sr = batch
+                x = x.to(device, non_blocking=True)
+                x_sr = x_sr.to(device, non_blocking=True)
+            else:
+                x = batch.to(device, non_blocking=True)
+                with torch.no_grad():
+                    x_sr = sr.sr_process(x)
 
             x_hat = rectifier(x_sr)
             loss = F.l1_loss(x_hat, x)

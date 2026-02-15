@@ -103,6 +103,11 @@ class Trainer(BaseModel):
         self.rectifier.to(device).eval()
 
         self.model.set_rectify_modules(self.sr_processor, self.rectifier, freeze_rectifier=True)
+        if hasattr(self.model, "set_sr_cache"):
+            self.model.set_sr_cache(
+                sr_cache_root=self.opt.sr_cache_root,
+                sr_cache_input_root=self.opt.sr_cache_input_root,
+            )
         print(f"Attached SR + rectifier from: {self.opt.rectifier_ckpt}")
 
 
@@ -118,9 +123,12 @@ class Trainer(BaseModel):
     def set_input(self, input):
         self.input = input[0].to(self.device)
         self.label = input[1].to(self.device).float()
+        self.image_paths = input[2] if len(input) > 2 else None
 
 
     def forward(self):
+        if hasattr(self.model, "set_current_paths"):
+            self.model.set_current_paths(self.image_paths)
         self.output = self.model(self.input)
         # self.output = self.output.view(-1).unsqueeze(1)
         self.output = self.output

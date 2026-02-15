@@ -16,6 +16,8 @@ class BaseOptions():
         parser.add_argument('--sr_model_name', type=str, default='RealESRGAN_x4plus', help='Real-ESRGAN model name')
         parser.add_argument('--sr_scale', type=int, default=4, help='SR scale factor')
         parser.add_argument('--sr_tile', type=int, default=512, help='SR tile size for Real-ESRGAN')
+        parser.add_argument('--sr_cache_root', type=str, default=None, help='optional root of precomputed SR cache')
+        parser.add_argument('--sr_cache_input_root', type=str, default=None, help='input_root used when precomputing SR cache')
         parser.add_argument('--resume_path', type=str, default=None)
         parser.add_argument('--load_whole_model', action='store_true', default=False)
         parser.add_argument('--scale', type=float, default=1.0)

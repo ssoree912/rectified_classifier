@@ -60,6 +60,7 @@ class RealFakeDataset(Dataset):
         assert opt.data_label in ["train", "val"]
         #assert opt.data_mode in ["ours", "wang2020", "ours_wang2020"]
         self.data_label  = opt.data_label
+        self.return_path = (self.data_label == "train") and (getattr(opt, "sr_cache_root", None) is not None)
 
 
         # initialize real_list and fake_list
@@ -136,6 +137,8 @@ class RealFakeDataset(Dataset):
             label = self.labels_dict[img_path]
             img = Image.open(img_path).convert("RGB")
             img = self.transform(img)
+            if self.return_path:
+                return img, label, img_path
             return img, label
         except:
             # jump broken images

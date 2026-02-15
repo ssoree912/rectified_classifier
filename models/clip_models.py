@@ -2,8 +2,10 @@ from .clip import clip
 from PIL import Image
 import torch.nn as nn
 import torch
+import os
 from models.transformer_attention import TransformerAttention
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 from .clip.model import VisionTransformer
 from .mlp import MLP
 
@@ -86,6 +88,9 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
         self.register_hook()
         self.sr_processor = sr_processor
         self.rectifier = rectifier
+        self.sr_cache_root = None
+        self.sr_cache_input_root = None
+        self.current_paths = None
 
         feature_dim = CHANNELS[name + "-penultimate"] if (name + "-penultimate") in CHANNELS else CHANNELS[name]
         self.attention_head = TransformerAttention(feature_dim, 2, last_dim=num_classes)
@@ -121,6 +126,13 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
                 p.requires_grad = False
             self.rectifier.eval()
 
+    def set_sr_cache(self, sr_cache_root=None, sr_cache_input_root=None):
+        self.sr_cache_root = sr_cache_root
+        self.sr_cache_input_root = sr_cache_input_root
+
+    def set_current_paths(self, paths):
+        self.current_paths = list(paths) if paths is not None else None
+
     def _to_image_space(self, x):
         if self.input_is_clip_normalized:
             x = x * self.clip_std + self.clip_mean
@@ -129,15 +141,61 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
     def _to_clip_space(self, x):
         return (x - self.clip_mean) / self.clip_std
 
+    def _resolve_cached_path(self, src_path):
+        if self.sr_cache_root is None or self.sr_cache_input_root is None:
+            return None
+        rel = os.path.relpath(src_path, self.sr_cache_input_root)
+        base = os.path.join(self.sr_cache_root, rel)
+        if os.path.exists(base):
+            return base
+        stem, _ = os.path.splitext(base)
+        for ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]:
+            cand = stem + ext
+            if os.path.exists(cand):
+                return cand
+        return None
+
+    def _load_cached_sr_batch(self, paths, target_hw, device, dtype):
+        tensors = []
+        for p in paths:
+            cache_path = self._resolve_cached_path(p)
+            if cache_path is None:
+                return None
+            img = Image.open(cache_path).convert("RGB")
+            tensors.append(TF.to_tensor(img))
+        x_sr = torch.stack(tensors, dim=0).to(device=device, dtype=dtype)
+        if x_sr.shape[-2:] != target_hw:
+            x_sr = torch.nn.functional.interpolate(
+                x_sr, size=target_hw, mode="bilinear", align_corners=False
+            )
+        return x_sr.clamp(0.0, 1.0)
+
     @torch.no_grad()
     def _make_delta(self, x):
-        if self.sr_processor is None or self.rectifier is None:
-            raise RuntimeError("sr_processor and rectifier must be set before forward().")
+        if self.rectifier is None:
+            raise RuntimeError("rectifier must be set before forward().")
 
         x_img = self._to_image_space(x)
         if next(self.rectifier.parameters()).device != x.device:
             self.rectifier = self.rectifier.to(x.device)
-        x_sr = self.sr_processor.sr_process(x_img).to(device=x.device, dtype=x.dtype)
+
+        x_sr = None
+        if self.current_paths is not None and len(self.current_paths) == x.shape[0]:
+            x_sr = self._load_cached_sr_batch(
+                self.current_paths,
+                target_hw=x_img.shape[-2:],
+                device=x.device,
+                dtype=x.dtype,
+            )
+
+        if x_sr is None:
+            if self.sr_processor is None:
+                raise RuntimeError(
+                    "sr_processor is required when SR cache is unavailable. "
+                    "Set sr_processor or provide valid sr cache paths."
+                )
+            x_sr = self.sr_processor.sr_process(x_img).to(device=x.device, dtype=x.dtype)
+
         x_hat = self.rectifier(x_sr)
         delta = torch.abs(x_sr - x_hat).clamp(0.0, 1.0)
         return self._to_clip_space(delta).to(dtype=x.dtype)
@@ -156,6 +214,7 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
             delta = self._make_delta(x)
             f_orig = self._encode_penultimate(x)
             f_delta = self._encode_penultimate(delta)
+        self.current_paths = None
         view_features = torch.stack([f_orig, f_delta], dim=1)
         fused = self.attention_head(view_features)
         if return_feature:
