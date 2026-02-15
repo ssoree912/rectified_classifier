@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from data.sr_rectify_dataset import SRRectifyDataset
+from dataset.sr_rectify_dataset import SRRectifyDataset
 from models.sr_modules import BasicSRProcessor
 from models.velocity import RectifierUNet
 
