@@ -4,6 +4,18 @@ import numpy as np
 import cv2
 import sys
 import os
+import types
+
+# torchvision / basicsr compatibility:
+# Some basicsr versions import `torchvision.transforms.functional_tensor`,
+# which is removed in newer torchvision releases.
+try:
+    import torchvision.transforms.functional_tensor  # noqa: F401
+except ModuleNotFoundError:
+    from torchvision.transforms.functional import rgb_to_grayscale
+    functional_tensor = types.ModuleType("torchvision.transforms.functional_tensor")
+    functional_tensor.rgb_to_grayscale = rgb_to_grayscale
+    sys.modules["torchvision.transforms.functional_tensor"] = functional_tensor
 
 # Real-ESRGAN import (repo-relative, container-safe)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
