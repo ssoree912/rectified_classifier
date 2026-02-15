@@ -1,4 +1,4 @@
-from .clip_models import CLIPModel, CLIPModelShuffleAttentionPenultimateLayer
+from .clip_models import CLIPModel, CLIPModelRectifyDiscrepancyAttention
 from .imagenet_models import ImagenetModel
 from .moco_models import MOCOModel_v3, MOCOModel_v3_ShuffleAttention, MOCOModel_v1, MOCOModel_v1_PatchesAttention, MOCOModel_v1_ShuffleAttention
 
@@ -50,9 +50,7 @@ def get_model(opt):
             else:
                 return CLIPModel(name[5:])
         elif opt.head_type == "attention":
-            # penultimate feature
-            if opt.shuffle:                
-                return CLIPModelShuffleAttentionPenultimateLayer(name[5:], shuffle_times=opt.shuffle_times, original_times=opt.original_times, patch_size=opt.patch_size)
+            return CLIPModelRectifyDiscrepancyAttention(name[5:])
 
     elif name.startswith("MOCO_v1:"):
         if opt.head_type == "fc":

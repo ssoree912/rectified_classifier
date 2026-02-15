@@ -2,7 +2,6 @@ from .clip import clip
 from PIL import Image
 import torch.nn as nn
 import torch
-import torch.nn.functional as F
 from models.transformer_attention import TransformerAttention
 import torchvision.transforms as transforms
 from .clip.model import VisionTransformer
@@ -64,19 +63,46 @@ class CLIPModelPenultimateLayer(nn.Module):
 
 
 
-class CLIPModelShuffleAttentionPenultimateLayer(nn.Module):
-    def __init__(self, name, num_classes=1,shuffle_times=1, patch_size=32, original_times=1):
-        super(CLIPModelShuffleAttentionPenultimateLayer, self).__init__()
+class CLIPModelRectifyDiscrepancyAttention(nn.Module):
+    """
+    Two-view attention classifier:
+      1) original x
+      2) discrepancy delta = |SR(D(x)) - R(SR(D(x)))|
+    """
+    def __init__(
+        self,
+        name,
+        num_classes=1,
+        sr_processor=None,
+        rectifier=None,
+        input_is_clip_normalized=True,
+        freeze_rectifier=True,
+    ):
+        super(CLIPModelRectifyDiscrepancyAttention, self).__init__()
         self.name = name
         self.num_classes = num_classes
-        self.shuffle_times = shuffle_times
-        self.original_times = original_times
-        self.patch_size = patch_size
+        self.input_is_clip_normalized = input_is_clip_normalized
         self.model, self.preprocess = clip.load(name, device="cpu") # self.preprecess will not be used during training, which is handled in Dataset class
         self.register_hook()
-        self.attention_head = TransformerAttention(CHANNELS[name+"-penultimate"], shuffle_times + original_times, last_dim=num_classes)
+        self.sr_processor = sr_processor
+        self.rectifier = rectifier
+
+        feature_dim = CHANNELS[name + "-penultimate"] if (name + "-penultimate") in CHANNELS else CHANNELS[name]
+        self.attention_head = TransformerAttention(feature_dim, 2, last_dim=num_classes)
+
         for name, param in self.model.named_parameters():
             param.requires_grad = False
+        self.model.eval()
+
+        clip_mean = torch.tensor(MEAN["clip"]).view(1, 3, 1, 1)
+        clip_std = torch.tensor(STD["clip"]).view(1, 3, 1, 1)
+        self.register_buffer("clip_mean", clip_mean, persistent=False)
+        self.register_buffer("clip_std", clip_std, persistent=False)
+
+        if self.rectifier is not None and freeze_rectifier:
+            for p in self.rectifier.parameters():
+                p.requires_grad = False
+            self.rectifier.eval()
 
     def register_hook(self):
         
@@ -86,30 +112,52 @@ class CLIPModelShuffleAttentionPenultimateLayer(nn.Module):
             if name == "ln_post":
                 module.register_forward_hook(hook)
         return 
-    
-    def shuffle_patches(self, x, patch_size):
-        B, C, H, W = x.size()
-        # Unfold the input tensor to extract non-overlapping patches
-        patches = F.unfold(x, kernel_size=patch_size, stride=patch_size, dilation=1)
-        # Reshape the patches to (B, C, patch_H, patch_W, num_patches)
-        shuffled_patches = patches[:, :, torch.randperm(patches.size(-1))]
-        # Fold the shuffled patches back into images
-        shuffled_images = F.fold(shuffled_patches, output_size=(H, W), kernel_size=patch_size, stride=patch_size)
-        return shuffled_images
+
+    def set_rectify_modules(self, sr_processor, rectifier, freeze_rectifier=True):
+        self.sr_processor = sr_processor
+        self.rectifier = rectifier.to(self.clip_mean.device)
+        if freeze_rectifier:
+            for p in self.rectifier.parameters():
+                p.requires_grad = False
+            self.rectifier.eval()
+
+    def _to_image_space(self, x):
+        if self.input_is_clip_normalized:
+            x = x * self.clip_std + self.clip_mean
+        return x.clamp(0.0, 1.0)
+
+    def _to_clip_space(self, x):
+        return (x - self.clip_mean) / self.clip_std
+
+    @torch.no_grad()
+    def _make_delta(self, x):
+        if self.sr_processor is None or self.rectifier is None:
+            raise RuntimeError("sr_processor and rectifier must be set before forward().")
+
+        x_img = self._to_image_space(x)
+        if next(self.rectifier.parameters()).device != x.device:
+            self.rectifier = self.rectifier.to(x.device)
+        x_sr = self.sr_processor.sr_process(x_img).to(device=x.device, dtype=x.dtype)
+        x_hat = self.rectifier(x_sr)
+        delta = torch.abs(x_sr - x_hat).clamp(0.0, 1.0)
+        return self._to_clip_space(delta).to(dtype=x.dtype)
+
+    @torch.no_grad()
+    def _encode_penultimate(self, x):
+        _ = self.model.encode_image(x)
+        feat = self.features
+        if feat.ndim == 3:
+            feat = feat[:, 0, :]
+        return feat
 
 
     def forward(self, x, return_feature=False):
-        features = []
         with torch.no_grad():
-            for i in range(self.shuffle_times):
-                self.model.encode_image(self.shuffle_patches(x, patch_size=self.patch_size[0]))
-                features.append(self.features)
-
-            self.model.encode_image(x)
-            for i in range(self.original_times):
-                features.append(self.features.clone())
-        features = self.attention_head(torch.stack(features, dim=-2))
-
-        return features
-
-
+            delta = self._make_delta(x)
+            f_orig = self._encode_penultimate(x)
+            f_delta = self._encode_penultimate(delta)
+        view_features = torch.stack([f_orig, f_delta], dim=1)
+        fused = self.attention_head(view_features)
+        if return_feature:
+            return fused, view_features
+        return fused

@@ -61,7 +61,7 @@ Before training, replace the folder path under the `TODO` placeholders in `train
 
 Execution:
 ```bash
-python train.py --name=train_d3 --arch=CLIP:ViT-L/14 --checkpoints_dir=path/to/save/checkpoints --fix_backbone --head_type=attention --batch_size=256 --shuffle --patch_size=14
+python train.py --name=train_d3 --arch=CLIP:ViT-L/14 --checkpoints_dir=path/to/save/checkpoints --fix_backbone --head_type=attention --batch_size=256 --rectifier_ckpt=path/to/rectifier.pth --sr_model_name=RealESRGAN_x4plus --sr_scale=4
 ```
 🔮 3. Inference Instructions
 
@@ -91,7 +91,6 @@ If you find our work helpful in your research, please cite it using the followin
   year={2025}
 }
 ```
-
 
 
 

@@ -70,6 +70,40 @@ class Trainer(BaseModel):
 
         # self.model = nn.parallel.DistributedDataParallel(self.model)
         self.model.to(opt.gpu_ids[0])
+        self._attach_rectify_modules_if_needed()
+
+    def _attach_rectify_modules_if_needed(self):
+        if not hasattr(self.model, "set_rectify_modules"):
+            return
+
+        if self.opt.rectifier_ckpt is None:
+            raise ValueError(
+                "rectifier_ckpt is required for discrepancy attention model. "
+                "Set --rectifier_ckpt /path/to/rectifier.pth"
+            )
+
+        from models.sr_modules import BasicSRProcessor
+        from models.velocity import RectifierUNet
+
+        device = f"cuda:{self.opt.gpu_ids[0]}" if len(self.opt.gpu_ids) > 0 else "cpu"
+        self.sr_processor = BasicSRProcessor(
+            scale=self.opt.sr_scale,
+            model_name=self.opt.sr_model_name,
+            device=device,
+            tile=self.opt.sr_tile,
+        )
+
+        self.rectifier = RectifierUNet(c_in=3)
+        state_dict = torch.load(self.opt.rectifier_ckpt, map_location="cpu")
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        if isinstance(state_dict, dict) and any(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+        self.rectifier.load_state_dict(state_dict, strict=True)
+        self.rectifier.to(device).eval()
+
+        self.model.set_rectify_modules(self.sr_processor, self.rectifier, freeze_rectifier=True)
+        print(f"Attached SR + rectifier from: {self.opt.rectifier_ckpt}")
 
 
 
@@ -103,5 +137,3 @@ class Trainer(BaseModel):
         self.optimizer.zero_grad()
         self.loss.backward()
         self.optimizer.step()
-
-

@@ -22,7 +22,9 @@ from dataset_paths import DATASET_PATHS
 import random
 import shutil
 from scipy.ndimage.filters import gaussian_filter
-from models.clip_models import CLIPModelShuffleAttentionPenultimateLayer
+from models.clip_models import CLIPModelRectifyDiscrepancyAttention
+from models.sr_modules import BasicSRProcessor
+from models.velocity import RectifierUNet
 import pandas as pd
 from calculate_global_ap import cal_global_ap
 
@@ -102,13 +104,9 @@ def calculate_acc(y_true, y_pred, thres):
 
 def validate(model, loader, find_thres=False, data_augment=None, threshold=0.5):
     drop_out_rate = 0.0
-    shuffle_rate = 0.0
     if hasattr(model, 'drop_out_rate') and model.drop_out_rate != 0.0:
         drop_out_rate = model.drop_out_rate
         model.drop_out_rate = 0.0
-    if hasattr(model, 'shuffle_rate') and model.shuffle_rate != 0.0:
-        shuffle_rate = model.shuffle_rate
-        model.shuffle_rate = 0.0
 
     with torch.no_grad():
         y_true, y_pred = [], []
@@ -126,8 +124,6 @@ def validate(model, loader, find_thres=False, data_augment=None, threshold=0.5):
             y_true.extend(label.flatten().tolist())
     if hasattr(model, 'drop_out_rate'):
         model.drop_out_rate = drop_out_rate
-    if hasattr(model, 'shuffle_rate'):
-        model.shuffle_rate = shuffle_rate
         
     y_true, y_pred = np.array(y_true), np.array(y_pred)
 
@@ -338,6 +334,10 @@ if __name__ == '__main__':
     # TODO: 
     result_folder = "/folder/for/saving/results"
     checkpoint = "/root/to/classifier/head.pth"
+    rectifier_ckpt = "/root/to/rectifier.pth"
+    sr_model_name = "RealESRGAN_x4plus"
+    sr_scale = 4
+    sr_tile = 512
     # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
     test_folders = ["/root/to/validation/folder1", "/root/to/validation/folder2"]
     batch_size = 128
@@ -352,7 +352,17 @@ if __name__ == '__main__':
 
     # create and load the detector
     granularity = 14
-    model = CLIPModelShuffleAttentionPenultimateLayer("ViT-L/14", shuffle_times=1, original_times=1, patch_size=[granularity])
+    model = CLIPModelRectifyDiscrepancyAttention("ViT-L/14")
+    sr_processor = BasicSRProcessor(scale=sr_scale, model_name=sr_model_name, device="cuda", tile=sr_tile)
+    rectifier = RectifierUNet(c_in=3)
+    rectifier_state = torch.load(rectifier_ckpt, map_location="cpu")
+    if isinstance(rectifier_state, dict) and "state_dict" in rectifier_state:
+        rectifier_state = rectifier_state["state_dict"]
+    if isinstance(rectifier_state, dict) and any(k.startswith("module.") for k in rectifier_state.keys()):
+        rectifier_state = {k.replace("module.", "", 1): v for k, v in rectifier_state.items()}
+    rectifier.load_state_dict(rectifier_state, strict=True)
+    rectifier.cuda().eval()
+    model.set_rectify_modules(sr_processor, rectifier, freeze_rectifier=True)
     is_norm = True
     print(f"using checkpoint {checkpoint}")
     state_dict = torch.load(checkpoint, map_location='cpu')
