@@ -5,10 +5,22 @@ import cv2
 import sys
 import os
 
-# Real-ESRGAN import
-sys.path.append('/Users/hwangsolhee/Desktop/mlpr/D3/Real-ESRGAN')
-from realesrgan import RealESRGANer
-from basicsr.archs.rrdbnet_arch import RRDBNet
+# Real-ESRGAN import (repo-relative, container-safe)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REALESRGAN_ROOT = os.path.join(PROJECT_ROOT, "Real-ESRGAN")
+if REALESRGAN_ROOT not in sys.path:
+    sys.path.insert(0, REALESRGAN_ROOT)
+
+try:
+    from realesrgan import RealESRGANer
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+except ModuleNotFoundError as e:
+    raise ModuleNotFoundError(
+        "Failed to import Real-ESRGAN modules. "
+        f"Expected local path: {REALESRGAN_ROOT}. "
+        "Install deps with `pip install -r Real-ESRGAN/requirements.txt` "
+        "or `pip install -e Real-ESRGAN`."
+    ) from e
 
 
 class BasicSRProcessor:
@@ -17,12 +29,16 @@ class BasicSRProcessor:
     def __init__(self, scale=4, model_name='RealESRGAN_x4plus', device='cuda', tile=512):
         self.scale = scale
         self.device = device
+        use_half = str(device).startswith("cuda")
         
         # Real-ESRGAN 모델 경로
-        model_path = f'/Users/hwangsolhee/Desktop/mlpr/D3/Real-ESRGAN/weights/{model_name}.pth'
+        model_path = os.path.join(REALESRGAN_ROOT, "weights", f"{model_name}.pth")
         
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}. "
+                "Place weights under Real-ESRGAN/weights."
+            )
         
         # RRDBNet 아키텍처 설정
         model = RRDBNet(
@@ -42,7 +58,7 @@ class BasicSRProcessor:
             tile=tile,
             tile_pad=10,
             pre_pad=0,
-            half=True,  # FP16 사용
+            half=use_half,  # use FP16 only on CUDA
             device=device
         )
         
