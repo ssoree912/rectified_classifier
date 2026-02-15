@@ -41,11 +41,11 @@ if __name__ == '__main__':
     opt = TrainOptions().parse()
     val_opt = get_val_opt()
     # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
-    val_data_root = ["folder1/containing/evaluation/images/from/generator1", "folder2/containing/evaluation/images/from/generator2"]
+    val_data_root = ["data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val"]
 
     # TODO: Your training data folders
-    real_folders = ["folder1/containing/real/images", "folder2/containing/real/images"]
-    fake_folders = ["folder1/containing/fake/images", "folder2/containing/fake/images"]
+    real_folders = ["/data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train/nature"]
+    fake_folders = ["/data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train/ai"]
     data_loader = create_dataloader(opt, real_folders, fake_folders)
 
     # initialize detector
