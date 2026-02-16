@@ -1,8 +1,10 @@
 import argparse
 import os
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.metrics import accuracy_score, average_precision_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -15,6 +17,8 @@ def parse_args():
     p = argparse.ArgumentParser("Train classifier on delta = r - R(r)")
     p.add_argument("--data_root", type=str, required=True)
     p.add_argument("--sr_cache_root", type=str, required=True)
+    p.add_argument("--val_data_root", type=str, nargs="*", default=None)
+    p.add_argument("--val_sr_cache_root", type=str, default=None)
     p.add_argument("--rect_ckpt", type=str, required=True)
     p.add_argument("--save_path", type=str, default="clf_delta.pth")
     p.add_argument("--image_size", type=int, default=256)
@@ -28,6 +32,7 @@ def parse_args():
     p.add_argument("--rect_width", type=int, default=64)
     p.add_argument("--rect_depth", type=int, default=10)
     p.add_argument("--clf_width", type=int, default=64)
+    p.add_argument("--threshold", type=float, default=0.5)
     return p.parse_args()
 
 
@@ -50,6 +55,55 @@ def load_state_dict_clean(path, device):
     return state
 
 
+def find_best_threshold(y_true, y_pred):
+    best_acc = -1.0
+    best_th = 0.5
+    for th in np.unique(y_pred):
+        acc = accuracy_score(y_true, y_pred > th)
+        if acc >= best_acc:
+            best_acc = acc
+            best_th = float(th)
+    return best_th
+
+
+def calculate_acc(y_true, y_pred, thres):
+    r_mask = y_true == 0
+    f_mask = y_true == 1
+    r_acc = accuracy_score(y_true[r_mask], y_pred[r_mask] > thres) if r_mask.any() else float("nan")
+    f_acc = accuracy_score(y_true[f_mask], y_pred[f_mask] > thres) if f_mask.any() else float("nan")
+    acc = accuracy_score(y_true, y_pred > thres)
+    return r_acc, f_acc, acc
+
+
+@torch.no_grad()
+def evaluate(clf, rect, loader, device, use_abs=False, threshold=0.5):
+    clf.eval()
+    y_true = []
+    y_pred = []
+    pbar = tqdm(loader, desc="[Eval]", leave=False)
+    for x, x_sr, y in pbar:
+        x = x.to(device, non_blocking=True)
+        x_sr = x_sr.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True).float()
+        delta = make_delta(x, x_sr, rect, use_abs=use_abs)
+        logits = clf(delta).squeeze(1)
+        y_pred.extend(logits.sigmoid().detach().cpu().tolist())
+        y_true.extend(y.detach().cpu().tolist())
+
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+
+    try:
+        ap = average_precision_score(y_true, y_pred)
+    except ValueError:
+        ap = float("nan")
+
+    r_acc0, f_acc0, acc0 = calculate_acc(y_true, y_pred, threshold)
+    best_thres = find_best_threshold(y_true, y_pred)
+    r_acc1, f_acc1, acc1 = calculate_acc(y_true, y_pred, best_thres)
+    return ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres
+
+
 def main():
     args = parse_args()
     device = "cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu"
@@ -65,6 +119,21 @@ def main():
         persistent_workers=(args.num_workers > 0),
     )
 
+    val_loaders = []
+    if args.val_data_root:
+        val_sr_cache_root = args.val_sr_cache_root or args.sr_cache_root
+        for root in args.val_data_root:
+            vds = SRBinaryDataset(root, val_sr_cache_root, image_size=args.image_size)
+            vdl = DataLoader(
+                vds,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=(device == "cuda"),
+                persistent_workers=(args.num_workers > 0),
+            )
+            val_loaders.append((root, vdl))
+
     rect = ResidualRectifierCNN(c_in=3, width=args.rect_width, depth=args.rect_depth).to(device)
     rect.load_state_dict(load_state_dict_clean(args.rect_ckpt, device))
     rect.eval()
@@ -76,6 +145,8 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and device == "cuda"))
 
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
+    best_path = os.path.splitext(args.save_path)[0] + "_best.pth"
+    best_acc = -1.0
 
     for ep in range(args.epochs):
         clf.train()
@@ -102,6 +173,46 @@ def main():
 
         torch.save(clf.state_dict(), args.save_path)
         print(f"Saved: {args.save_path}")
+
+        if val_loaders:
+            acc_list = []
+            ap_list = []
+            b_acc_list = []
+            thres_list = []
+            for root, vdl in val_loaders:
+                ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres = evaluate(
+                    clf=clf,
+                    rect=rect,
+                    loader=vdl,
+                    device=device,
+                    use_abs=args.use_abs,
+                    threshold=args.threshold,
+                )
+                print(
+                    f"(Val on {root} @ epoch {ep + 1}) "
+                    f"acc: {acc0:.4f}; ap: {ap:.4f}; "
+                    f"r_acc0:{r_acc0:.4f}, f_acc0:{f_acc0:.4f}, "
+                    f"r_acc1:{r_acc1:.4f}, f_acc1:{f_acc1:.4f}, "
+                    f"acc1:{acc1:.4f}, best_thres:{best_thres:.4f}"
+                )
+                acc_list.append(acc0)
+                ap_list.append(ap)
+                b_acc_list.append(acc1)
+                thres_list.append(best_thres)
+
+            mean_acc = float(np.nanmean(acc_list))
+            mean_ap = float(np.nanmean(ap_list))
+            mean_b_acc = float(np.nanmean(b_acc_list))
+            mean_thres = float(np.nanmean(thres_list))
+            print(
+                f"(average Val @ epoch {ep + 1}) "
+                f"acc: {mean_acc:.4f}; ap: {mean_ap:.4f}; "
+                f"b_acc: {mean_b_acc:.4f}; best_thres: {mean_thres:.4f}"
+            )
+            if mean_acc >= best_acc:
+                best_acc = mean_acc
+                torch.save(clf.state_dict(), best_path)
+                print(f"Saved best: {best_path} (acc={best_acc:.4f})")
 
 
 if __name__ == "__main__":
