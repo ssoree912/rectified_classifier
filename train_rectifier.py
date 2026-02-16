@@ -4,6 +4,7 @@ import os
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset.sr_rectify_dataset import SRRectifyDataset
 from models.velocity import RectifierUNet
@@ -20,6 +21,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--log_every", type=int, default=20, help="Update tqdm postfix every N steps")
     parser.add_argument("--device", type=str, default="cuda")
     return parser.parse_args()
 
@@ -56,7 +58,8 @@ def main():
         rectifier.train()
         total_loss = 0.0
 
-        for x, x_sr in loader:
+        pbar = tqdm(loader, desc=f"Epoch {epoch + 1}/{args.epochs}", leave=True)
+        for step, (x, x_sr) in enumerate(pbar, start=1):
             x = x.to(device, non_blocking=True)
             x_sr = x_sr.to(device, non_blocking=True)
 
@@ -68,6 +71,8 @@ def main():
             optimizer.step()
 
             total_loss += loss.item()
+            if step % args.log_every == 0 or step == len(loader):
+                pbar.set_postfix(loss=f"{loss.item():.6f}", avg=f"{(total_loss / step):.6f}")
 
         avg_loss = total_loss / max(len(loader), 1)
         print(f"[Epoch {epoch + 1}/{args.epochs}] L1: {avg_loss:.6f}")
