@@ -12,7 +12,7 @@ from models.velocity import RectifierUNet
 def parse_args():
     parser = argparse.ArgumentParser(description="Train SR rectifier: SR(D(x)) -> x")
     parser.add_argument("--img_dir", type=str, required=True, help="Directory with real training images")
-    parser.add_argument("--sr_cache_root", type=str, default=None, help="Optional root of precomputed SR(D(x)) cache")
+    parser.add_argument("--sr_cache_root", type=str, required=True, help="Root of precomputed SR(D(x)) cache")
     parser.add_argument("--save_path", type=str, default="rectifier.pth")
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -21,9 +21,6 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--sr_scale", type=int, default=4)
-    parser.add_argument("--sr_model_name", type=str, default="RealESRGAN_x4plus")
-    parser.add_argument("--sr_tile", type=int, default=512)
     return parser.parse_args()
 
 
@@ -33,17 +30,9 @@ def resolve_device(device_arg: str) -> str:
     return device_arg
 
 
-def freeze_sr(sr_processor):
-    if hasattr(sr_processor, "upsampler") and hasattr(sr_processor.upsampler, "model"):
-        for p in sr_processor.upsampler.model.parameters():
-            p.requires_grad = False
-        sr_processor.upsampler.model.eval()
-
-
 def main():
     args = parse_args()
     device = resolve_device(args.device)
-    use_sr_cache = args.sr_cache_root is not None
 
     dataset = SRRectifyDataset(
         args.img_dir,
@@ -58,17 +47,6 @@ def main():
         pin_memory=(device == "cuda"),
     )
 
-    sr = None
-    if not use_sr_cache:
-        from models.sr_modules import BasicSRProcessor
-        sr = BasicSRProcessor(
-            scale=args.sr_scale,
-            model_name=args.sr_model_name,
-            device=device,
-            tile=args.sr_tile,
-        )
-        freeze_sr(sr)
-
     rectifier = RectifierUNet(c_in=3).to(device)
     optimizer = torch.optim.Adam(rectifier.parameters(), lr=args.lr)
 
@@ -78,15 +56,9 @@ def main():
         rectifier.train()
         total_loss = 0.0
 
-        for batch in loader:
-            if use_sr_cache:
-                x, x_sr = batch
-                x = x.to(device, non_blocking=True)
-                x_sr = x_sr.to(device, non_blocking=True)
-            else:
-                x = batch.to(device, non_blocking=True)
-                with torch.no_grad():
-                    x_sr = sr.sr_process(x)
+        for x, x_sr in loader:
+            x = x.to(device, non_blocking=True)
+            x_sr = x_sr.to(device, non_blocking=True)
 
             x_hat = rectifier(x_sr)
             loss = F.l1_loss(x_hat, x)

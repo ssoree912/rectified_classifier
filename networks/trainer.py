@@ -81,18 +81,14 @@ class Trainer(BaseModel):
                 "rectifier_ckpt is required for discrepancy attention model. "
                 "Set --rectifier_ckpt /path/to/rectifier.pth"
             )
+        if self.opt.sr_cache_root is None or self.opt.sr_cache_input_root is None:
+            raise ValueError(
+                "SR cache is required. Set both --sr_cache_root and --sr_cache_input_root."
+            )
 
-        from models.sr_modules import BasicSRProcessor
         from models.velocity import RectifierUNet
 
         device = f"cuda:{self.opt.gpu_ids[0]}" if len(self.opt.gpu_ids) > 0 else "cpu"
-        self.sr_processor = BasicSRProcessor(
-            scale=self.opt.sr_scale,
-            model_name=self.opt.sr_model_name,
-            device=device,
-            tile=self.opt.sr_tile,
-        )
-
         self.rectifier = RectifierUNet(c_in=3)
         state_dict = torch.load(self.opt.rectifier_ckpt, map_location="cpu")
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
@@ -102,7 +98,7 @@ class Trainer(BaseModel):
         self.rectifier.load_state_dict(state_dict, strict=True)
         self.rectifier.to(device).eval()
 
-        self.model.set_rectify_modules(self.sr_processor, self.rectifier, freeze_rectifier=True)
+        self.model.set_rectify_modules(self.rectifier, freeze_rectifier=True)
         if hasattr(self.model, "set_sr_cache"):
             self.model.set_sr_cache(
                 sr_cache_root=self.opt.sr_cache_root,

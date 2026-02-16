@@ -23,7 +23,6 @@ import random
 import shutil
 from scipy.ndimage.filters import gaussian_filter
 from models.clip_models import CLIPModelRectifyDiscrepancyAttention
-from models.sr_modules import BasicSRProcessor
 from models.velocity import RectifierUNet
 import pandas as pd
 from calculate_global_ap import cal_global_ap
@@ -111,7 +110,13 @@ def validate(model, loader, find_thres=False, data_augment=None, threshold=0.5):
     with torch.no_grad():
         y_true, y_pred = [], []
         print ("Length of dataset: %d" %(len(loader)))
-        for img, label in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                img, label, paths = batch
+                if hasattr(model, "set_current_paths"):
+                    model.set_current_paths(paths)
+            else:
+                img, label = batch
             in_tens = img.cuda()
             if data_augment != None:
                 in_tens = data_augment(in_tens)
@@ -154,7 +159,11 @@ def decoupled_validate(model, loader, find_thres=False, data_augment=None):
     with torch.no_grad():
         y_true, y_orig_pred, y_shuffle_pred = [], [], []
         print ("Length of dataset: %d" %(len(loader)))
-        for img, label in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                img, label, _ = batch
+            else:
+                img, label = batch
             in_tens = img.cuda()
             if data_augment != None:
                 in_tens = data_augment(in_tens)
@@ -335,9 +344,8 @@ if __name__ == '__main__':
     result_folder = "/folder/for/saving/results"
     checkpoint = "/root/to/classifier/head.pth"
     rectifier_ckpt = "/root/to/rectifier.pth"
-    sr_model_name = "RealESRGAN_x4plus"
-    sr_scale = 4
-    sr_tile = 512
+    sr_cache_input_root = "/root/to/train_or_val_root"
+    sr_cache_root = "/root/to/train_or_val_sr_cache_root"
     # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
     test_folders = ["/root/to/validation/folder1", "/root/to/validation/folder2"]
     batch_size = 128
@@ -353,7 +361,6 @@ if __name__ == '__main__':
     # create and load the detector
     granularity = 14
     model = CLIPModelRectifyDiscrepancyAttention("ViT-L/14")
-    sr_processor = BasicSRProcessor(scale=sr_scale, model_name=sr_model_name, device="cuda", tile=sr_tile)
     rectifier = RectifierUNet(c_in=3)
     rectifier_state = torch.load(rectifier_ckpt, map_location="cpu")
     if isinstance(rectifier_state, dict) and "state_dict" in rectifier_state:
@@ -362,7 +369,8 @@ if __name__ == '__main__':
         rectifier_state = {k.replace("module.", "", 1): v for k, v in rectifier_state.items()}
     rectifier.load_state_dict(rectifier_state, strict=True)
     rectifier.cuda().eval()
-    model.set_rectify_modules(sr_processor, rectifier, freeze_rectifier=True)
+    model.set_rectify_modules(rectifier, freeze_rectifier=True)
+    model.set_sr_cache(sr_cache_root=sr_cache_root, sr_cache_input_root=sr_cache_input_root)
     is_norm = True
     print(f"using checkpoint {checkpoint}")
     state_dict = torch.load(checkpoint, map_location='cpu')

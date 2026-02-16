@@ -99,7 +99,13 @@ def validate(model, loader, find_thres=False, data_augment=None, threshold=0.5):
     with torch.no_grad():
         y_true, y_pred = [], []
         print ("Length of dataset: %d" %(len(loader)))
-        for img, label in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                img, label, paths = batch
+                if hasattr(model, "set_current_paths"):
+                    model.set_current_paths(paths)
+            else:
+                img, label = batch
             in_tens = img.cuda()
             if data_augment != None:
                 in_tens = data_augment(in_tens)
@@ -138,7 +144,11 @@ def decoupled_validate(model, loader, find_thres=False, data_augment=None):
     with torch.no_grad():
         y_true, y_orig_pred, y_shuffle_pred = [], [], []
         print ("Length of dataset: %d" %(len(loader)))
-        for img, label in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                img, label, _ = batch
+            else:
+                img, label = batch
             in_tens = img.cuda()
             if data_augment != None:
                 in_tens = data_augment(in_tens)
@@ -361,4 +371,3 @@ if __name__ == '__main__':
 
         with open( os.path.join(opt.result_folder,'acc0.txt'), 'a') as f:
             f.write(dataset_path['key']+': ' + str(round(r_acc0*100, 2))+'  '+str(round(f_acc0*100, 2))+'  '+str(round(acc0*100, 2))+'\n' )
-

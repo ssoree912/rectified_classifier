@@ -75,7 +75,6 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
         self,
         name,
         num_classes=1,
-        sr_processor=None,
         rectifier=None,
         input_is_clip_normalized=True,
         freeze_rectifier=True,
@@ -86,7 +85,6 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
         self.input_is_clip_normalized = input_is_clip_normalized
         self.model, self.preprocess = clip.load(name, device="cpu") # self.preprecess will not be used during training, which is handled in Dataset class
         self.register_hook()
-        self.sr_processor = sr_processor
         self.rectifier = rectifier
         self.sr_cache_root = None
         self.sr_cache_input_root = None
@@ -118,8 +116,7 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
                 module.register_forward_hook(hook)
         return 
 
-    def set_rectify_modules(self, sr_processor, rectifier, freeze_rectifier=True):
-        self.sr_processor = sr_processor
+    def set_rectify_modules(self, rectifier, freeze_rectifier=True):
         self.rectifier = rectifier.to(self.clip_mean.device)
         if freeze_rectifier:
             for p in self.rectifier.parameters():
@@ -174,27 +171,25 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
     def _make_delta(self, x):
         if self.rectifier is None:
             raise RuntimeError("rectifier must be set before forward().")
+        if self.sr_cache_root is None or self.sr_cache_input_root is None:
+            raise RuntimeError(
+                "SR cache is required. Set --sr_cache_root and --sr_cache_input_root."
+            )
 
         x_img = self._to_image_space(x)
         if next(self.rectifier.parameters()).device != x.device:
             self.rectifier = self.rectifier.to(x.device)
 
-        x_sr = None
-        if self.current_paths is not None and len(self.current_paths) == x.shape[0]:
-            x_sr = self._load_cached_sr_batch(
-                self.current_paths,
-                target_hw=x_img.shape[-2:],
-                device=x.device,
-                dtype=x.dtype,
-            )
-
+        if self.current_paths is None or len(self.current_paths) != x.shape[0]:
+            raise RuntimeError("Current image paths are required to resolve SR cache.")
+        x_sr = self._load_cached_sr_batch(
+            self.current_paths,
+            target_hw=x_img.shape[-2:],
+            device=x.device,
+            dtype=x.dtype,
+        )
         if x_sr is None:
-            if self.sr_processor is None:
-                raise RuntimeError(
-                    "sr_processor is required when SR cache is unavailable. "
-                    "Set sr_processor or provide valid sr cache paths."
-                )
-            x_sr = self.sr_processor.sr_process(x_img).to(device=x.device, dtype=x.dtype)
+            raise RuntimeError("Missing SR cache file for one or more images in batch.")
 
         x_hat = self.rectifier(x_sr)
         delta = torch.abs(x_sr - x_hat).clamp(0.0, 1.0)

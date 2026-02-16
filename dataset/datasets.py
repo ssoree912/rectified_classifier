@@ -60,7 +60,7 @@ class RealFakeDataset(Dataset):
         assert opt.data_label in ["train", "val"]
         #assert opt.data_mode in ["ours", "wang2020", "ours_wang2020"]
         self.data_label  = opt.data_label
-        self.return_path = (self.data_label == "train") and (getattr(opt, "sr_cache_root", None) is not None)
+        self.return_path = getattr(opt, "sr_cache_root", None) is not None
 
 
         # initialize real_list and fake_list

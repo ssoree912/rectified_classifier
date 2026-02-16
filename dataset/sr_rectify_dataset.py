@@ -35,13 +35,14 @@ class SRRectifyDataset(Dataset):
         if self.sr_cache_root is None:
             return None
         rel = img_path.relative_to(self.img_root)
-        direct = self.sr_cache_root / rel
-        if direct.exists():
-            return direct
-        for ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]:
-            cand = direct.with_suffix(ext)
-            if cand.exists():
-                return cand
+        candidates = [self.sr_cache_root / rel, self.sr_cache_root / self.img_root.name / rel]
+        for direct in candidates:
+            if direct.exists():
+                return direct
+            for ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]:
+                cand = direct.with_suffix(ext)
+                if cand.exists():
+                    return cand
         return None
 
     def __getitem__(self, idx):
