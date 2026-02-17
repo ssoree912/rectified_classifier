@@ -14,6 +14,8 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--last_epoch', type=int, default=-1, help='starting epoch count for scheduler intialization')
         parser.add_argument('--train_split', type=str, default='train', help='train, val, test, etc')
         parser.add_argument('--val_split', type=str, default='val', help='train, val, test, etc')
+        parser.add_argument('--train_data_root', type=str, default='data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train')
+        parser.add_argument('--val_data_roots', nargs='+', default=['data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val'])
         parser.add_argument('--niter', type=int, default=100, help='total epoches')
         parser.add_argument('--beta1', type=float, default=0.9, help='momentum term of adam')
         parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate for adam')
