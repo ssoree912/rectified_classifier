@@ -33,6 +33,23 @@ def get_val_opt():
     return val_opt
 
 
+def resolve_class_folders(root):
+    real_dir = os.path.join(root, "real")
+    fake_dir = os.path.join(root, "fake")
+    if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
+        return [real_dir], [fake_dir]
+
+    real_dir = os.path.join(root, "nature")
+    fake_dir = os.path.join(root, "ai")
+    if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
+        return [real_dir], [fake_dir]
+
+    raise ValueError(
+        f"Could not find class folders under {root}. "
+        "Expected (real,fake) or (nature,ai)."
+    )
+
+
 
 if __name__ == '__main__':
     seed = 418
@@ -40,12 +57,13 @@ if __name__ == '__main__':
     torch.cuda.manual_seed(seed)
     opt = TrainOptions().parse()
     val_opt = get_val_opt()
-    # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
-    val_data_root = ["folder1/containing/evaluation/images/from/generator1", "folder2/containing/evaluation/images/from/generator2"]
+    opt.checkpoints_dir = "ckpts/baseline"
+    val_opt.checkpoints_dir = opt.checkpoints_dir
 
-    # TODO: Your training data folders
-    real_folders = ["folder1/containing/real/images", "folder2/containing/real/images"]
-    fake_folders = ["folder1/containing/fake/images", "folder2/containing/fake/images"]
+    train_data_root = "data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train"
+    val_data_root = ["data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val"]
+
+    real_folders, fake_folders = resolve_class_folders(train_data_root)
     data_loader = create_dataloader(opt, real_folders, fake_folders)
 
     # initialize detector
@@ -54,9 +72,7 @@ if __name__ == '__main__':
     # initialize val datasets 
     val_loader_list = [] # a list of data loader
     for root in val_data_root:
-        # initialize training datasets
-        real_folders = [os.path.join(root, "real")]
-        fake_folders = [os.path.join(root, "fake")]
+        real_folders, fake_folders = resolve_class_folders(root)
         val_loader_list.append(create_dataloader(val_opt, real_folders, fake_folders))
 
     train_writer = SummaryWriter(os.path.join(opt.checkpoints_dir, opt.name, "train"))
@@ -129,4 +145,3 @@ if __name__ == '__main__':
                 print("Early stopping.")
                 break
         model.train()
-

@@ -335,11 +335,9 @@ if __name__ == '__main__':
 
     # basic configuration
     set_seed(418)
-    # TODO: 
-    result_folder = "/folder/for/saving/results"
-    checkpoint = "/root/to/classifier/head.pth"
-    # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
-    test_folders = ["/root/to/validation/folder1", "/root/to/validation/folder2"]
+    result_folder = "ckpts/baseline/results"
+    checkpoint = "ckpts/baseline/train_d3/model_epoch_best.pth"
+    test_folders = ["data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val"]
     batch_size = 128
     jpeg_quality = None # jpeg compression, none means no compression
     gaussian_sigma = None # gaussian blurring, none means no blurring
@@ -373,8 +371,19 @@ if __name__ == '__main__':
     y_pred_list = []
     y_true_list = []
     for path in test_folders:
-        dataset = RealFakeDataset(  os.path.join(path, "real"), 
-                                    os.path.join(path, "fake"), 
+        real_dir = os.path.join(path, "real")
+        fake_dir = os.path.join(path, "fake")
+        if not (os.path.isdir(real_dir) and os.path.isdir(fake_dir)):
+            real_dir = os.path.join(path, "nature")
+            fake_dir = os.path.join(path, "ai")
+        if not (os.path.isdir(real_dir) and os.path.isdir(fake_dir)):
+            raise ValueError(
+                f"Could not find class folders under {path}. "
+                "Expected (real,fake) or (nature,ai)."
+            )
+
+        dataset = RealFakeDataset(  real_dir, 
+                                    fake_dir, 
                                     max_sample, 
                                     arch,
                                     jpeg_quality=jpeg_quality, 
