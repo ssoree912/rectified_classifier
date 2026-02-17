@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score, average_precision_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from dataset.residual_binary_cache_dataset import ResidualBinaryCacheDataset
 from dataset.sr_binary_dataset import SRBinaryDataset
 from models.residual_rectifier import ResidualRectifierCNN
 from models.delta_classifier import SmallCNN
@@ -15,10 +16,12 @@ from models.delta_classifier import SmallCNN
 
 def parse_args():
     p = argparse.ArgumentParser("Train classifier on delta = r - R(r)")
-    p.add_argument("--data_root", type=str, required=True)
-    p.add_argument("--sr_cache_root", type=str, required=True)
+    p.add_argument("--data_root", type=str, default=None)
+    p.add_argument("--sr_cache_root", type=str, default=None)
+    p.add_argument("--residual_cache_root", type=str, default=None)
     p.add_argument("--val_data_root", type=str, nargs="*", default=None)
     p.add_argument("--val_sr_cache_root", type=str, default=None)
+    p.add_argument("--val_residual_cache_root", type=str, default=None)
     p.add_argument("--rect_ckpt", type=str, required=True)
     p.add_argument("--save_path", type=str, default="clf_delta.pth")
     p.add_argument("--image_size", type=int, default=256)
@@ -39,6 +42,15 @@ def parse_args():
 @torch.no_grad()
 def make_delta(x, x_sr, rectifier, use_abs=False):
     r = x_sr - x
+    r_hat = rectifier(r)
+    delta = r - r_hat
+    if use_abs:
+        delta = delta.abs()
+    return delta
+
+
+@torch.no_grad()
+def make_delta_from_residual(r, rectifier, use_abs=False):
     r_hat = rectifier(r)
     delta = r - r_hat
     if use_abs:
@@ -76,16 +88,23 @@ def calculate_acc(y_true, y_pred, thres):
 
 
 @torch.no_grad()
-def evaluate(clf, rect, loader, device, use_abs=False, threshold=0.5):
+def evaluate(clf, rect, loader, device, use_abs=False, threshold=0.5, use_residual_cache=False):
     clf.eval()
     y_true = []
     y_pred = []
     pbar = tqdm(loader, desc="[Eval]", leave=False)
-    for x, x_sr, y in pbar:
-        x = x.to(device, non_blocking=True)
-        x_sr = x_sr.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True).float()
-        delta = make_delta(x, x_sr, rect, use_abs=use_abs)
+    for batch in pbar:
+        if use_residual_cache:
+            r, y = batch
+            r = r.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).float()
+            delta = make_delta_from_residual(r, rect, use_abs=use_abs)
+        else:
+            x, x_sr, y = batch
+            x = x.to(device, non_blocking=True)
+            x_sr = x_sr.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).float()
+            delta = make_delta(x, x_sr, rect, use_abs=use_abs)
         logits = clf(delta).squeeze(1)
         y_pred.extend(logits.sigmoid().detach().cpu().tolist())
         y_true.extend(y.detach().cpu().tolist())
@@ -109,7 +128,15 @@ def main():
     device = "cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu"
     torch.backends.cudnn.benchmark = True
 
-    ds = SRBinaryDataset(args.data_root, args.sr_cache_root, image_size=args.image_size)
+    use_residual_cache = args.residual_cache_root is not None
+    if use_residual_cache:
+        ds = ResidualBinaryCacheDataset(args.residual_cache_root)
+        print(f"Using residual cache for train: {args.residual_cache_root}")
+    else:
+        if args.data_root is None or args.sr_cache_root is None:
+            raise ValueError("--data_root and --sr_cache_root are required when residual cache is not used.")
+        ds = SRBinaryDataset(args.data_root, args.sr_cache_root, image_size=args.image_size)
+        print(f"Using SR cache for train: {args.sr_cache_root}")
     dl = DataLoader(
         ds,
         batch_size=args.batch_size,
@@ -120,10 +147,9 @@ def main():
     )
 
     val_loaders = []
-    if args.val_data_root:
-        val_sr_cache_root = args.val_sr_cache_root or args.sr_cache_root
-        for root in args.val_data_root:
-            vds = SRBinaryDataset(root, val_sr_cache_root, image_size=args.image_size)
+    if use_residual_cache:
+        if args.val_residual_cache_root is not None:
+            vds = ResidualBinaryCacheDataset(args.val_residual_cache_root)
             vdl = DataLoader(
                 vds,
                 batch_size=args.batch_size,
@@ -132,7 +158,26 @@ def main():
                 pin_memory=(device == "cuda"),
                 persistent_workers=(args.num_workers > 0),
             )
-            val_loaders.append((root, vdl))
+            val_name = args.val_data_root[0] if args.val_data_root else args.val_residual_cache_root
+            val_loaders.append((val_name, vdl))
+        elif args.val_data_root:
+            raise ValueError(
+                "--val_residual_cache_root is required for validation when --residual_cache_root is used."
+            )
+    else:
+        if args.val_data_root:
+            val_sr_cache_root = args.val_sr_cache_root or args.sr_cache_root
+            for root in args.val_data_root:
+                vds = SRBinaryDataset(root, val_sr_cache_root, image_size=args.image_size)
+                vdl = DataLoader(
+                    vds,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.num_workers,
+                    pin_memory=(device == "cuda"),
+                    persistent_workers=(args.num_workers > 0),
+                )
+                val_loaders.append((root, vdl))
 
     rect = ResidualRectifierCNN(c_in=3, width=args.rect_width, depth=args.rect_depth).to(device)
     rect.load_state_dict(load_state_dict_clean(args.rect_ckpt, device))
@@ -152,13 +197,20 @@ def main():
         clf.train()
         total = 0.0
         pbar = tqdm(dl, desc=f"[Classifier] epoch {ep + 1}/{args.epochs}")
-        for step, (x, x_sr, y) in enumerate(pbar, start=1):
-            x = x.to(device, non_blocking=True)
-            x_sr = x_sr.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).float().unsqueeze(1)
-
-            with torch.no_grad():
-                delta = make_delta(x, x_sr, rect, use_abs=args.use_abs)
+        for step, batch in enumerate(pbar, start=1):
+            if use_residual_cache:
+                r, y = batch
+                r = r.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True).float().unsqueeze(1)
+                with torch.no_grad():
+                    delta = make_delta_from_residual(r, rect, use_abs=args.use_abs)
+            else:
+                x, x_sr, y = batch
+                x = x.to(device, non_blocking=True)
+                x_sr = x_sr.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True).float().unsqueeze(1)
+                with torch.no_grad():
+                    delta = make_delta(x, x_sr, rect, use_abs=args.use_abs)
 
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(args.amp and device == "cuda")):
@@ -187,6 +239,7 @@ def main():
                     device=device,
                     use_abs=args.use_abs,
                     threshold=args.threshold,
+                    use_residual_cache=use_residual_cache,
                 )
                 print(
                     f"(Val on {root} @ epoch {ep + 1}) "
