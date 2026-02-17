@@ -41,7 +41,14 @@ class ResidualBinaryCacheDataset(Dataset):
 
     def __getitem__(self, idx):
         path, y = self.items[idx]
-        r = torch.load(path, map_location="cpu")
+        # Try faster loading path on newer PyTorch; fallback for compatibility.
+        try:
+            r = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        except TypeError:
+            try:
+                r = torch.load(path, map_location="cpu", weights_only=True)
+            except TypeError:
+                r = torch.load(path, map_location="cpu")
         if isinstance(r, dict):
             if "residual" in r:
                 r = r["residual"]

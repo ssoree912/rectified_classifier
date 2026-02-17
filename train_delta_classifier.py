@@ -14,6 +14,23 @@ from models.residual_rectifier import ResidualRectifierCNN
 from models.delta_classifier import SmallCNN
 
 
+def build_amp_tools(use_amp: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+        def autocast_ctx():
+            return torch.amp.autocast("cuda", enabled=use_amp)
+
+        return scaler, autocast_ctx
+
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    def autocast_ctx():
+        return torch.cuda.amp.autocast(enabled=use_amp)
+
+    return scaler, autocast_ctx
+
+
 def parse_args():
     p = argparse.ArgumentParser("Train classifier on delta = r - R(r)")
     p.add_argument("--data_root", type=str, default=None)
@@ -27,6 +44,7 @@ def parse_args():
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--prefetch_factor", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--amp", action="store_true")
@@ -144,6 +162,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=(device == "cuda"),
         persistent_workers=(args.num_workers > 0),
+        prefetch_factor=(args.prefetch_factor if args.num_workers > 0 else None),
     )
 
     val_loaders = []
@@ -157,6 +176,7 @@ def main():
                 num_workers=args.num_workers,
                 pin_memory=(device == "cuda"),
                 persistent_workers=(args.num_workers > 0),
+                prefetch_factor=(args.prefetch_factor if args.num_workers > 0 else None),
             )
             val_name = args.val_data_root[0] if args.val_data_root else args.val_residual_cache_root
             val_loaders.append((val_name, vdl))
@@ -176,6 +196,7 @@ def main():
                     num_workers=args.num_workers,
                     pin_memory=(device == "cuda"),
                     persistent_workers=(args.num_workers > 0),
+                    prefetch_factor=(args.prefetch_factor if args.num_workers > 0 else None),
                 )
                 val_loaders.append((root, vdl))
 
@@ -187,7 +208,8 @@ def main():
 
     clf = SmallCNN(c_in=3, width=args.clf_width).to(device)
     opt = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=1e-4)
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and device == "cuda"))
+    use_amp = args.amp and device == "cuda"
+    scaler, autocast_ctx = build_amp_tools(use_amp)
 
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
     best_path = os.path.splitext(args.save_path)[0] + "_best.pth"
@@ -213,7 +235,7 @@ def main():
                     delta = make_delta(x, x_sr, rect, use_abs=args.use_abs)
 
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(args.amp and device == "cuda")):
+            with autocast_ctx():
                 logits = clf(delta)
                 loss = F.binary_cross_entropy_with_logits(logits, y)
             scaler.scale(loss).backward()
