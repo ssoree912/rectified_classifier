@@ -1,0 +1,194 @@
+import os
+import pickle
+from io import BytesIO
+from random import choice, random, shuffle
+
+import cv2
+import numpy as np
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
+from PIL import Image
+from PIL import ImageFile
+from scipy.ndimage.filters import gaussian_filter
+from torch.utils.data import Dataset
+
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+MEAN = {
+    "imagenet": [0.485, 0.456, 0.406],
+    "clip": [0.48145466, 0.4578275, 0.40821073],
+}
+
+STD = {
+    "imagenet": [0.229, 0.224, 0.225],
+    "clip": [0.26862954, 0.26130258, 0.27577711],
+}
+
+
+def recursively_read(rootdir, must_contain, exts=("png", "jpg", "JPEG", "jpeg", "PNG")):
+    out = []
+    for r, _, files in os.walk(rootdir):
+        for file in files:
+            if file.split(".")[-1] in exts and must_contain in os.path.join(r, file):
+                out.append(os.path.join(r, file))
+    return out
+
+
+def get_list(path, must_contain=""):
+    if path.endswith(".pickle"):
+        with open(path, "rb") as f:
+            image_list = pickle.load(f)
+        return [item for item in image_list if must_contain in item]
+    return recursively_read(path, must_contain)
+
+
+class RealFakeDataset(Dataset):
+    def __init__(self, opt, real_folders, fake_folders):
+        assert opt.data_label in ["train", "val"]
+        self.data_label = opt.data_label
+
+        real_list = []
+        fake_list = []
+        for path in real_folders:
+            real_list += get_list(path)
+        for path in fake_folders:
+            fake_list += get_list(path)
+
+        self.labels_dict = {}
+        for p in real_list:
+            self.labels_dict[p] = 0
+        for p in fake_list:
+            self.labels_dict[p] = 1
+
+        self.total_list = real_list + fake_list
+        shuffle(self.total_list)
+
+        if opt.isTrain:
+            crop_func = transforms.RandomCrop(opt.cropSize)
+        elif opt.no_crop:
+            crop_func = transforms.Lambda(lambda img: img)
+        else:
+            crop_func = transforms.CenterCrop(opt.cropSize)
+
+        if opt.isTrain and not opt.no_flip:
+            flip_func = transforms.RandomHorizontalFlip()
+        else:
+            flip_func = transforms.Lambda(lambda img: img)
+
+        if not opt.isTrain and opt.no_resize:
+            rz_func = transforms.Lambda(lambda img: img)
+        else:
+            rz_func = transforms.Lambda(lambda img: custom_resize(img, opt))
+
+        stat_from = "imagenet" if opt.arch.lower().startswith("moco") else "clip"
+        print("mean and std stats are from: ", stat_from)
+
+        if not opt.isTrain:
+            self.transform = transforms.Compose(
+                [
+                    transforms.Resize((opt.cropSize, opt.cropSize)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=MEAN[stat_from], std=STD[stat_from]),
+                ]
+            )
+        else:
+            self.transform = transforms.Compose(
+                [
+                    rz_func,
+                    transforms.Lambda(lambda img: data_augment(img, opt)),
+                    crop_func,
+                    flip_func,
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=MEAN[stat_from], std=STD[stat_from]),
+                ]
+            )
+
+    def __len__(self):
+        return len(self.total_list)
+
+    def __getitem__(self, idx):
+        try:
+            img_path = self.total_list[idx]
+            label = self.labels_dict[img_path]
+            img = Image.open(img_path).convert("RGB")
+            img = self.transform(img)
+            return img, label
+        except Exception:
+            return self.__getitem__(idx + 1)
+
+
+def data_augment(img, opt):
+    img = np.array(img)
+    if img.ndim == 2:
+        img = np.expand_dims(img, axis=2)
+        img = np.repeat(img, 3, axis=2)
+
+    if random() < opt.blur_prob:
+        sig = sample_continuous(opt.blur_sig)
+        gaussian_blur(img, sig)
+
+    if random() < opt.jpg_prob:
+        method = sample_discrete(opt.jpg_method)
+        qual = sample_discrete(opt.jpg_qual)
+        img = jpeg_from_key(img, qual, method)
+
+    return Image.fromarray(img)
+
+
+def sample_continuous(s):
+    if len(s) == 1:
+        return s[0]
+    if len(s) == 2:
+        return random() * (s[1] - s[0]) + s[0]
+    raise ValueError("Length of iterable s should be 1 or 2.")
+
+
+def sample_discrete(s):
+    if len(s) == 1:
+        return s[0]
+    return choice(s)
+
+
+def gaussian_blur(img, sigma):
+    gaussian_filter(img[:, :, 0], output=img[:, :, 0], sigma=sigma)
+    gaussian_filter(img[:, :, 1], output=img[:, :, 1], sigma=sigma)
+    gaussian_filter(img[:, :, 2], output=img[:, :, 2], sigma=sigma)
+
+
+def cv2_jpg(img, compress_val):
+    img_cv2 = img[:, :, ::-1]
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compress_val]
+    _, encimg = cv2.imencode(".jpg", img_cv2, encode_param)
+    decimg = cv2.imdecode(encimg, 1)
+    return decimg[:, :, ::-1]
+
+
+def pil_jpg(img, compress_val):
+    out = BytesIO()
+    img = Image.fromarray(img)
+    img.save(out, format="jpeg", quality=compress_val)
+    img = Image.open(out)
+    img = np.array(img)
+    out.close()
+    return img
+
+
+jpeg_dict = {"cv2": cv2_jpg, "pil": pil_jpg}
+
+
+def jpeg_from_key(img, compress_val, key):
+    return jpeg_dict[key](img, compress_val)
+
+
+rz_dict = {
+    "bilinear": Image.BILINEAR,
+    "bicubic": Image.BICUBIC,
+    "lanczos": Image.LANCZOS,
+    "nearest": Image.NEAREST,
+}
+
+
+def custom_resize(img, opt):
+    interp = sample_discrete(opt.rz_interp)
+    return TF.resize(img, opt.loadSize, interpolation=rz_dict[interp])
