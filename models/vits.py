@@ -11,8 +11,13 @@ from functools import partial, reduce
 from operator import mul
 
 from timm.models.vision_transformer import VisionTransformer, _cfg
-from timm.models.layers.helpers import to_2tuple
-from timm.models.layers import PatchEmbed
+try:
+    # timm >= 0.9 / 1.x
+    from timm.layers import PatchEmbed, to_2tuple
+except ImportError:
+    # older timm
+    from timm.models.layers import PatchEmbed
+    from timm.models.layers.helpers import to_2tuple
 
 __all__ = [
     'vit_small', 
