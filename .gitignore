@@ -13,7 +13,7 @@ val/
 
 # TensorBoard 로그
 events.out.tfevents.*
-
+**/__pycache__/**
 # 데이터셋 폴더
 diffusion_datasets/
 FAKE_IMAGES/
