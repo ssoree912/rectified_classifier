@@ -15,6 +15,8 @@ class SRBinaryDataset(Dataset):
       root/real/... and root/fake/...
     Also supports:
       root/nature/... and root/ai/...
+    Also supports:
+      root/real/... and root/<multiple fake-generator dirs>/...
     """
 
     def __init__(self, root, sr_cache_root, image_size=256):
@@ -28,17 +30,34 @@ class SRBinaryDataset(Dataset):
             real_dir = self.root / "nature"
         if not fake_dir.is_dir():
             fake_dir = self.root / "ai"
-        if not real_dir.is_dir() or not fake_dir.is_dir():
+
+        fake_dirs = []
+        if real_dir.is_dir() and fake_dir.is_dir():
+            fake_dirs = [fake_dir]
+        elif real_dir.is_dir():
+            for d in sorted(self.root.iterdir()):
+                if not d.is_dir():
+                    continue
+                if d == real_dir:
+                    continue
+                if d.name.startswith("."):
+                    continue
+                fake_dirs.append(d)
+
+        if not real_dir.is_dir() or not fake_dirs:
             raise ValueError(
-                f"Could not find class folders under {self.root}. "
-                "Expected (real,fake) or (nature,ai)."
+                f"Could not find valid class folders under {self.root}. "
+                "Expected (real,fake), (nature,ai), or (real + multiple fake folders)."
             )
 
         self.items = []
-        for d, y in [(real_dir, 0), (fake_dir, 1)]:
+        for p in real_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in VALID_EXTS:
+                self.items.append((p, 0))
+        for d in fake_dirs:
             for p in d.rglob("*"):
                 if p.is_file() and p.suffix.lower() in VALID_EXTS:
-                    self.items.append((p, y))
+                    self.items.append((p, 1))
         self.items.sort(key=lambda x: str(x[0]))
         if not self.items:
             raise ValueError(f"No images found under: {self.root}")

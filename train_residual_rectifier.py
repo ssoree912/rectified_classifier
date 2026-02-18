@@ -58,6 +58,20 @@ def ensure_real_only_dir(img_dir: str, allow_mixed: bool = False):
             "Set --img_dir to a real-only directory."
         )
 
+    # Guard for generic multi-generator layouts: root/real + many fake folders.
+    if "real" in child_dirs and len(child_dirs - {"real"}) > 0:
+        raise ValueError(
+            f"img_dir appears mixed/non-real-only ({p}). "
+            "Found `real` plus additional sibling folders. "
+            "Set --img_dir to the real-only directory (e.g. .../real)."
+        )
+    if "nature" in child_dirs and len(child_dirs - {"nature"}) > 0:
+        raise ValueError(
+            f"img_dir appears mixed/non-real-only ({p}). "
+            "Found `nature` plus additional sibling folders. "
+            "Set --img_dir to the real-only directory (e.g. .../nature)."
+        )
+
 
 def main():
     args = parse_args()
