@@ -44,9 +44,41 @@ def resolve_class_folders(root):
     if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
         return [real_dir], [fake_dir]
 
+    # Generic multi-generator layout:
+    # root/real + root/<generator_name_1>, root/<generator_name_2>, ...
+    real_dir = os.path.join(root, "real")
+    if os.path.isdir(real_dir):
+        fake_dirs = []
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if not os.path.isdir(p):
+                continue
+            lower = name.lower()
+            if lower in {"real", "__pycache__"} or name.startswith("."):
+                continue
+            fake_dirs.append(p)
+        if fake_dirs:
+            return [real_dir], fake_dirs
+
+    # Alternate generic layout:
+    # root/nature + root/<generator_name_1>, root/<generator_name_2>, ...
+    real_dir = os.path.join(root, "nature")
+    if os.path.isdir(real_dir):
+        fake_dirs = []
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if not os.path.isdir(p):
+                continue
+            lower = name.lower()
+            if lower in {"nature", "__pycache__"} or name.startswith("."):
+                continue
+            fake_dirs.append(p)
+        if fake_dirs:
+            return [real_dir], fake_dirs
+
     raise ValueError(
         f"Could not find class folders under {root}. "
-        "Expected (real,fake) or (nature,ai)."
+        "Expected (real,fake), (nature,ai), or (real + multiple fake folders)."
     )
 
 
@@ -60,10 +92,12 @@ if __name__ == '__main__':
     opt.checkpoints_dir = "ckpts/baseline"
     val_opt.checkpoints_dir = opt.checkpoints_dir
 
-    train_data_root = "data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train"
-    val_data_root = ["data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val"]
+    train_data_root = opt.train_data_root
+    val_data_root = opt.val_data_roots
 
     real_folders, fake_folders = resolve_class_folders(train_data_root)
+    print(f"[Train] real folders: {real_folders}")
+    print(f"[Train] fake folders: {fake_folders}")
     data_loader = create_dataloader(opt, real_folders, fake_folders)
 
     # initialize detector
@@ -73,6 +107,8 @@ if __name__ == '__main__':
     val_loader_list = [] # a list of data loader
     for root in val_data_root:
         real_folders, fake_folders = resolve_class_folders(root)
+        print(f"[Val:{root}] real folders: {real_folders}")
+        print(f"[Val:{root}] fake folders: {fake_folders}")
         val_loader_list.append(create_dataloader(val_opt, real_folders, fake_folders))
 
     train_writer = SummaryWriter(os.path.join(opt.checkpoints_dir, opt.name, "train"))

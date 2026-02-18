@@ -21,6 +21,7 @@ FAKE_IMAGES/
 # Python 캐시
 __pycache__/
 *.py[cod]
+*.cpython-*.pyc
 *$py.class
 *.so
 
@@ -51,3 +52,4 @@ Thumbs.db
 *_ypred.npz
 *_ytrue.npz
 baseline_predication_for_pr_roc_curve.pth
+ckpts/

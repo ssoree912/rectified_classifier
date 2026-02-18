@@ -17,6 +17,18 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--niter', type=int, default=100, help='total epoches')
         parser.add_argument('--beta1', type=float, default=0.9, help='momentum term of adam')
         parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate for adam')
+        parser.add_argument(
+            '--train_data_root',
+            type=str,
+            default='data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train',
+            help='root folder of train split',
+        )
+        parser.add_argument(
+            '--val_data_roots',
+            nargs='+',
+            default=['data/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/val'],
+            help='one or more validation split roots',
+        )
 
         self.isTrain = True
         return parser
