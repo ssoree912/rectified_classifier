@@ -5,6 +5,7 @@ import argparse
 from ast import arg
 import os
 import csv
+from pathlib import Path
 import torch
 import torchvision.transforms as transforms
 import torch.utils.data
@@ -338,95 +339,134 @@ class RealFakeDataset(Dataset):
 
 if __name__ == '__main__':
 
-    # basic configuration
-    set_seed(418)
-    # TODO: 
-    result_folder = "/folder/for/saving/results"
-    checkpoint = "/root/to/classifier/head.pth"
-    rectifier_ckpt = "/root/to/rectifier.pth"
-    sr_cache_input_root = "/root/to/train_or_val_root"
-    sr_cache_root = "/root/to/train_or_val_sr_cache_root"
-    # TODO: Your test/evaluation image folder containing "real" and "fake" subfolders
-    test_folders = ["/root/to/validation/folder1", "/root/to/validation/folder2"]
-    batch_size = 128
-    jpeg_quality = None # jpeg compression, none means no compression
-    gaussian_sigma = None # gaussian blurring, none means no blurring
-    exp_name = f"validation"
+    parser = argparse.ArgumentParser("Validate rectified D3 checkpoints")
+    parser.add_argument("--checkpoints", nargs="+", required=True, help="One or more classifier head checkpoints")
+    parser.add_argument("--rectifier_ckpt", type=str, required=True)
+    parser.add_argument("--sr_cache_input_root", type=str, required=True)
+    parser.add_argument("--sr_cache_root", type=str, required=True)
+    parser.add_argument("--test_folders", nargs="+", required=True)
+    parser.add_argument("--result_folder", type=str, default="ckpts/baseline/results")
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--jpeg_quality", type=int, default=None)
+    parser.add_argument("--gaussian_sigma", type=int, default=None)
+    parser.add_argument("--exp_name", type=str, default="validation")
+    parser.add_argument("--max_sample", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=418)
+    parser.add_argument("--clip_model", type=str, default="ViT-L/14")
+    args = parser.parse_args()
 
-    max_sample = None 
+    set_seed(args.seed)
+    os.makedirs(args.result_folder, exist_ok=True)
 
-    if not os.path.exists(result_folder):
-        os.makedirs(result_folder)
-
-    # create and load the detector
-    granularity = 14
-    model = CLIPModelRectifyDiscrepancyAttention("ViT-L/14")
     rectifier = RectifierUNet(c_in=3)
-    rectifier_state = torch.load(rectifier_ckpt, map_location="cpu")
+    rectifier_state = torch.load(args.rectifier_ckpt, map_location="cpu")
     if isinstance(rectifier_state, dict) and "state_dict" in rectifier_state:
         rectifier_state = rectifier_state["state_dict"]
     if isinstance(rectifier_state, dict) and any(k.startswith("module.") for k in rectifier_state.keys()):
         rectifier_state = {k.replace("module.", "", 1): v for k, v in rectifier_state.items()}
     rectifier.load_state_dict(rectifier_state, strict=True)
     rectifier.cuda().eval()
-    model.set_rectify_modules(rectifier, freeze_rectifier=True)
-    model.set_sr_cache(sr_cache_root=sr_cache_root, sr_cache_input_root=sr_cache_input_root)
-    is_norm = True
-    print(f"using checkpoint {checkpoint}")
-    state_dict = torch.load(checkpoint, map_location='cpu')
-    model.attention_head.load_state_dict(state_dict)
-    print ("Model loaded..")
-    model.eval()
-    model.cuda()
 
-    
-    results_dict = {}
     arch = "clip"
+    is_norm = True
 
-    # data to record
-    acc_list = []
-    ap_list = []
-    b_acc_list = []
-    threshold_list = []
-    y_pred_list = []
-    y_true_list = []
-    for path in test_folders:
-        dataset = RealFakeDataset(  os.path.join(path, "real"), 
-                                    os.path.join(path, "fake"), 
-                                    max_sample, 
-                                    arch,
-                                    jpeg_quality=jpeg_quality, 
-                                    gaussian_sigma=gaussian_sigma,
-                                    is_norm=is_norm
-                                    )
+    def _resolve_class_dirs(root):
+        real_dir = os.path.join(root, "real")
+        fake_dir = os.path.join(root, "fake")
+        if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
+            return real_dir, fake_dir
+        real_dir = os.path.join(root, "nature")
+        fake_dir = os.path.join(root, "ai")
+        if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
+            return real_dir, fake_dir
+        raise ValueError(
+            f"Could not find class folders under {root}. "
+            "Expected (real,fake) or (nature,ai)."
+        )
 
-        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-        ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres, y_pred, y_true = validate(model, loader, find_thres=True)
-        print(acc0)
+    for checkpoint in args.checkpoints:
+        print(f"using checkpoint {checkpoint}")
+        model = CLIPModelRectifyDiscrepancyAttention(args.clip_model)
+        model.set_rectify_modules(rectifier, freeze_rectifier=True)
+        model.set_sr_cache(
+            sr_cache_root=args.sr_cache_root,
+            sr_cache_input_root=args.sr_cache_input_root,
+        )
+        state_dict = torch.load(checkpoint, map_location='cpu')
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        if isinstance(state_dict, dict) and any(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+        model.attention_head.load_state_dict(state_dict, strict=True)
+        model.eval()
+        model.cuda()
+        print("Model loaded..")
 
-        acc_list.append(acc0)
-        ap_list.append(ap)
-        b_acc_list.append(acc1)
-        threshold_list.append(best_thres)
-        y_pred_list.append(y_pred)
-        y_true_list.append(y_true)
+        results_dict = {}
+        acc_list = []
+        ap_list = []
+        b_acc_list = []
+        threshold_list = []
+        y_pred_list = []
+        y_true_list = []
 
-    acc_list.append(sum(acc_list)/len(acc_list))
-    ap_list.append(sum(ap_list)/len(ap_list))
-    b_acc_list.append(sum(b_acc_list)/len(b_acc_list))
-    threshold_list.append(sum(threshold_list)/len(threshold_list))
+        for path in args.test_folders:
+            real_dir, fake_dir = _resolve_class_dirs(path)
+            dataset = RealFakeDataset(
+                real_dir,
+                fake_dir,
+                args.max_sample,
+                arch,
+                jpeg_quality=args.jpeg_quality,
+                gaussian_sigma=args.gaussian_sigma,
+                is_norm=is_norm,
+            )
+            loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+            )
+            ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres, y_pred, y_true = validate(
+                model,
+                loader,
+                find_thres=True,
+            )
+            print(acc0)
+            acc_list.append(acc0)
+            ap_list.append(ap)
+            b_acc_list.append(acc1)
+            threshold_list.append(best_thres)
+            y_pred_list.append(y_pred)
+            y_true_list.append(y_true)
 
-    results_dict[f'{gaussian_sigma}_{jpeg_quality}_ap'] = ap_list
-    results_dict[f'{gaussian_sigma}_{jpeg_quality}_acc'] = acc_list
-    results_dict[f'{gaussian_sigma}_{jpeg_quality}_b_acc'] = b_acc_list
-    results_dict[f'{gaussian_sigma}_{jpeg_quality}_b_threshold'] = threshold_list
-    results_df = pd.DataFrame(results_dict)
-    results_df.to_excel(os.path.join(result_folder, f'{exp_name}.xlsx'), sheet_name='sheet1', index=False)
+        acc_list.append(sum(acc_list) / len(acc_list))
+        ap_list.append(sum(ap_list) / len(ap_list))
+        b_acc_list.append(sum(b_acc_list) / len(b_acc_list))
+        threshold_list.append(sum(threshold_list) / len(threshold_list))
 
-    np.savez(os.path.join(result_folder, f'{gaussian_sigma}_{jpeg_quality}_ypred.npz'), *y_pred_list)
-    np.savez(os.path.join(result_folder, f'{gaussian_sigma}_{jpeg_quality}_ytrue.npz'), *y_true_list)
-    
-    # calculating global ap
-    combined_list = [[y_p, y_t] for y_p, y_t in zip(y_pred_list, y_true_list)]
+        results_dict[f'{args.gaussian_sigma}_{args.jpeg_quality}_ap'] = ap_list
+        results_dict[f'{args.gaussian_sigma}_{args.jpeg_quality}_acc'] = acc_list
+        results_dict[f'{args.gaussian_sigma}_{args.jpeg_quality}_b_acc'] = b_acc_list
+        results_dict[f'{args.gaussian_sigma}_{args.jpeg_quality}_b_threshold'] = threshold_list
+        results_df = pd.DataFrame(results_dict)
 
-    cal_global_ap(combined_list)
+        ckpt_name = Path(checkpoint).stem
+        out_prefix = f"{args.exp_name}_{ckpt_name}"
+        results_df.to_excel(
+            os.path.join(args.result_folder, f'{out_prefix}.xlsx'),
+            sheet_name='sheet1',
+            index=False,
+        )
+        np.savez(
+            os.path.join(args.result_folder, f'{out_prefix}_{args.gaussian_sigma}_{args.jpeg_quality}_ypred.npz'),
+            *y_pred_list,
+        )
+        np.savez(
+            os.path.join(args.result_folder, f'{out_prefix}_{args.gaussian_sigma}_{args.jpeg_quality}_ytrue.npz'),
+            *y_true_list,
+        )
+
+        combined_list = [[y_p, y_t] for y_p, y_t in zip(y_pred_list, y_true_list)]
+        cal_global_ap(combined_list)
