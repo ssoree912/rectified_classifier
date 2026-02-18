@@ -1,7 +1,9 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import accuracy_score, average_precision_score
 from torch.utils.data import DataLoader, Dataset
@@ -26,6 +28,8 @@ def parse_args():
     p.add_argument("--rect_depth", type=int, default=10)
     p.add_argument("--clf_width", type=int, default=64)
     p.add_argument("--max_items", type=int, default=None)
+    p.add_argument("--result_folder", type=str, default=None)
+    p.add_argument("--exp_name", type=str, default="delta_eval")
     return p.parse_args()
 
 
@@ -125,7 +129,7 @@ def evaluate(rect, clf, loader, device, threshold=0.5, use_abs=False):
     r_acc0, f_acc0, acc0 = calculate_acc(y_true, y_pred, threshold)
     best_th = find_best_threshold(y_true, y_pred)
     r_acc1, f_acc1, acc1 = calculate_acc(y_true, y_pred, best_th)
-    return ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th
+    return ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th, y_pred, y_true
 
 
 def main():
@@ -152,7 +156,7 @@ def main():
     clf = SmallCNN(c_in=3, width=args.clf_width).to(device)
     clf.load_state_dict(load_state_dict_clean(args.clf_ckpt, device), strict=True)
 
-    ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th = evaluate(
+    ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th, y_pred, y_true = evaluate(
         rect=rect,
         clf=clf,
         loader=dl,
@@ -163,6 +167,93 @@ def main():
     print(f"AP: {ap:.6f}")
     print(f"ACC@{args.threshold:.3f}: real={r_acc0:.6f} fake={f_acc0:.6f} total={acc0:.6f}")
     print(f"ACC@best_th({best_th:.6f}): real={r_acc1:.6f} fake={f_acc1:.6f} total={acc1:.6f}")
+
+    if args.result_folder:
+        result_dir = Path(args.result_folder)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_name = Path(args.clf_ckpt).stem
+        prefix = f"{args.exp_name}_{ckpt_name}"
+
+        metrics = {
+            "residual_cache_root": str(Path(args.residual_cache_root).resolve()),
+            "rect_ckpt": str(Path(args.rect_ckpt).resolve()),
+            "clf_ckpt": str(Path(args.clf_ckpt).resolve()),
+            "num_samples": int(len(ds)),
+            "threshold": float(args.threshold),
+            "use_abs": bool(args.use_abs),
+            "ap": float(ap),
+            "acc0_real": float(r_acc0),
+            "acc0_fake": float(f_acc0),
+            "acc0_total": float(acc0),
+            "best_threshold": float(best_th),
+            "acc1_real": float(r_acc1),
+            "acc1_fake": float(f_acc1),
+            "acc1_total": float(acc1),
+        }
+
+        with open(result_dir / f"{prefix}_metrics.json", "w", encoding="utf-8") as f:
+            json.dump(metrics, f, ensure_ascii=True, indent=2)
+
+        with open(result_dir / f"{prefix}_metrics.txt", "w", encoding="utf-8") as f:
+            f.write(f"AP: {ap:.6f}\n")
+            f.write(
+                f"ACC@{args.threshold:.3f}: real={r_acc0:.6f} fake={f_acc0:.6f} total={acc0:.6f}\n"
+            )
+            f.write(
+                f"ACC@best_th({best_th:.6f}): real={r_acc1:.6f} fake={f_acc1:.6f} total={acc1:.6f}\n"
+            )
+
+        np.savez(
+            result_dir / f"{prefix}_predictions.npz",
+            y_pred=np.asarray(y_pred, dtype=np.float32),
+            y_true=np.asarray(y_true, dtype=np.float32),
+        )
+
+        # Unified output format with validate.py
+        df = pd.DataFrame(
+            [
+                dict(
+                    dataset=Path(args.residual_cache_root).name,
+                    ap=float(ap),
+                    ap_pct=float(ap * 100.0),
+                    r_acc0=float(r_acc0),
+                    r_acc0_pct=float(r_acc0 * 100.0),
+                    f_acc0=float(f_acc0),
+                    f_acc0_pct=float(f_acc0 * 100.0),
+                    acc0=float(acc0),
+                    acc0_pct=float(acc0 * 100.0),
+                    r_acc1=float(r_acc1),
+                    r_acc1_pct=float(r_acc1 * 100.0),
+                    f_acc1=float(f_acc1),
+                    f_acc1_pct=float(f_acc1 * 100.0),
+                    acc1=float(acc1),
+                    acc1_pct=float(acc1 * 100.0),
+                    best_thres=float(best_th),
+                ),
+                dict(
+                    dataset="average",
+                    ap=float(ap),
+                    ap_pct=float(ap * 100.0),
+                    r_acc0=float(r_acc0),
+                    r_acc0_pct=float(r_acc0 * 100.0),
+                    f_acc0=float(f_acc0),
+                    f_acc0_pct=float(f_acc0 * 100.0),
+                    acc0=float(acc0),
+                    acc0_pct=float(acc0 * 100.0),
+                    r_acc1=float(r_acc1),
+                    r_acc1_pct=float(r_acc1 * 100.0),
+                    f_acc1=float(f_acc1),
+                    f_acc1_pct=float(f_acc1 * 100.0),
+                    acc1=float(acc1),
+                    acc1_pct=float(acc1 * 100.0),
+                    best_thres=float(best_th),
+                ),
+            ]
+        )
+        df.to_excel(result_dir / "validation.xlsx", index=False)
+        np.savez(result_dir / "validation_ypred.npz", np.asarray(y_pred, dtype=np.float32))
+        np.savez(result_dir / "validation_ytrue.npz", np.asarray(y_true, dtype=np.float32))
+        print(f"Saved results to: {result_dir}")
 
 
 if __name__ == "__main__":

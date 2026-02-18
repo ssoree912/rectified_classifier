@@ -21,6 +21,7 @@ from dataset_paths import DATASET_PATHS
 import random
 import shutil
 from scipy.ndimage import gaussian_filter
+import pandas as pd
 from models.clip import clip
 from models.clip_models import CHANNELS
 from models.transformer_attention import TransformerAttention
@@ -429,6 +430,9 @@ if __name__ == '__main__':
     else:
         dataset_paths = [ dict(real_path=opt.real_path, fake_path=opt.fake_path, data_mode=opt.data_mode) ]
 
+    results_rows = []
+    y_pred_list = []
+    y_true_list = []
 
 
     for dataset_path in (dataset_paths):
@@ -446,13 +450,60 @@ if __name__ == '__main__':
         loader = torch.utils.data.DataLoader(dataset, batch_size=opt.batch_size, shuffle=False, num_workers=4)
         val_out = validate(model, loader, find_thres=True)
         ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres = val_out[:8]
+        y_pred, y_true = val_out[8], val_out[9]
         dataset_key = dataset_path.get(
             "key",
             f"{os.path.basename(dataset_path['real_path'])}_vs_{os.path.basename(dataset_path['fake_path'])}",
         )
+        results_rows.append(
+            dict(
+                dataset=dataset_key,
+                ap=ap,
+                ap_pct=ap * 100.0,
+                r_acc0=r_acc0,
+                r_acc0_pct=r_acc0 * 100.0,
+                f_acc0=f_acc0,
+                f_acc0_pct=f_acc0 * 100.0,
+                acc0=acc0,
+                acc0_pct=acc0 * 100.0,
+                r_acc1=r_acc1,
+                r_acc1_pct=r_acc1 * 100.0,
+                f_acc1=f_acc1,
+                f_acc1_pct=f_acc1 * 100.0,
+                acc1=acc1,
+                acc1_pct=acc1 * 100.0,
+                best_thres=best_thres,
+            )
+        )
+        y_pred_list.append(np.array(y_pred))
+        y_true_list.append(np.array(y_true))
 
         with open( os.path.join(opt.result_folder,'ap.txt'), 'a') as f:
             f.write(dataset_key+': ' + str(round(ap*100, 2))+'\n' )
 
         with open( os.path.join(opt.result_folder,'acc0.txt'), 'a') as f:
             f.write(dataset_key+': ' + str(round(r_acc0*100, 2))+'  '+str(round(f_acc0*100, 2))+'  '+str(round(acc0*100, 2))+'\n' )
+
+    if len(results_rows) > 0:
+        mean_row = {
+            "dataset": "average",
+            "ap": float(np.mean([r["ap"] for r in results_rows])),
+            "ap_pct": float(np.mean([r["ap_pct"] for r in results_rows])),
+            "r_acc0": float(np.mean([r["r_acc0"] for r in results_rows])),
+            "r_acc0_pct": float(np.mean([r["r_acc0_pct"] for r in results_rows])),
+            "f_acc0": float(np.mean([r["f_acc0"] for r in results_rows])),
+            "f_acc0_pct": float(np.mean([r["f_acc0_pct"] for r in results_rows])),
+            "acc0": float(np.mean([r["acc0"] for r in results_rows])),
+            "acc0_pct": float(np.mean([r["acc0_pct"] for r in results_rows])),
+            "r_acc1": float(np.mean([r["r_acc1"] for r in results_rows])),
+            "r_acc1_pct": float(np.mean([r["r_acc1_pct"] for r in results_rows])),
+            "f_acc1": float(np.mean([r["f_acc1"] for r in results_rows])),
+            "f_acc1_pct": float(np.mean([r["f_acc1_pct"] for r in results_rows])),
+            "acc1": float(np.mean([r["acc1"] for r in results_rows])),
+            "acc1_pct": float(np.mean([r["acc1_pct"] for r in results_rows])),
+            "best_thres": float(np.mean([r["best_thres"] for r in results_rows])),
+        }
+        df = pd.DataFrame(results_rows + [mean_row])
+        df.to_excel(os.path.join(opt.result_folder, "validation.xlsx"), index=False)
+        np.savez(os.path.join(opt.result_folder, "validation_ypred.npz"), *y_pred_list)
+        np.savez(os.path.join(opt.result_folder, "validation_ytrue.npz"), *y_true_list)
