@@ -20,7 +20,7 @@ from copy import deepcopy
 from dataset_paths import DATASET_PATHS
 import random
 import shutil
-from scipy.ndimage.filters import gaussian_filter
+from scipy.ndimage import gaussian_filter
 from models.clip import clip
 from models.clip_models import CHANNELS
 from models.transformer_attention import TransformerAttention
@@ -444,10 +444,15 @@ if __name__ == '__main__':
                                     )
 
         loader = torch.utils.data.DataLoader(dataset, batch_size=opt.batch_size, shuffle=False, num_workers=4)
-        ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres = validate(model, loader, find_thres=True)
+        val_out = validate(model, loader, find_thres=True)
+        ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres = val_out[:8]
+        dataset_key = dataset_path.get(
+            "key",
+            f"{os.path.basename(dataset_path['real_path'])}_vs_{os.path.basename(dataset_path['fake_path'])}",
+        )
 
         with open( os.path.join(opt.result_folder,'ap.txt'), 'a') as f:
-            f.write(dataset_path['key']+': ' + str(round(ap*100, 2))+'\n' )
+            f.write(dataset_key+': ' + str(round(ap*100, 2))+'\n' )
 
         with open( os.path.join(opt.result_folder,'acc0.txt'), 'a') as f:
-            f.write(dataset_path['key']+': ' + str(round(r_acc0*100, 2))+'  '+str(round(f_acc0*100, 2))+'  '+str(round(acc0*100, 2))+'\n' )
+            f.write(dataset_key+': ' + str(round(r_acc0*100, 2))+'  '+str(round(f_acc0*100, 2))+'  '+str(round(acc0*100, 2))+'\n' )
