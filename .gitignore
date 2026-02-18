@@ -24,6 +24,7 @@ __pycache__/
 *.cpython-*.pyc
 *$py.class
 *.so
+*.pyc
 
 # 가상환경
 venv/
