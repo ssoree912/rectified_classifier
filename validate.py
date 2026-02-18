@@ -2,6 +2,7 @@ import argparse
 from ast import arg
 import os
 import csv
+from types import SimpleNamespace
 import torch
 import torchvision.transforms as transforms
 import torch.utils.data
@@ -337,7 +338,12 @@ if __name__ == '__main__':
         shutil.rmtree(opt.result_folder)
     os.makedirs(opt.result_folder)
 
-    model = get_model(opt.arch)
+    model_opt = SimpleNamespace(
+        arch=opt.arch,
+        head_type="fc",
+        penultimate_feature=False,
+    )
+    model = get_model(model_opt)
     state_dict = torch.load(opt.ckpt, map_location='cpu')
     model.fc.load_state_dict(state_dict)
     print ("Model loaded..")
