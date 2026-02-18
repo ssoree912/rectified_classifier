@@ -4,6 +4,7 @@ import os
 import csv
 from types import SimpleNamespace
 import torch
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torch.utils.data
 import numpy as np
@@ -20,6 +21,9 @@ from dataset_paths import DATASET_PATHS
 import random
 import shutil
 from scipy.ndimage.filters import gaussian_filter
+from models.clip import clip
+from models.clip_models import CHANNELS
+from models.transformer_attention import TransformerAttention
 
 SEED = 0
 def set_seed():
@@ -38,6 +42,56 @@ STD = {
     "imagenet":[0.229, 0.224, 0.225],
     "clip":[0.26862954, 0.26130258, 0.27577711]
 }
+
+
+class CLIPShuffleAttentionEval(torch.nn.Module):
+    def __init__(self, clip_name, shuffle_times=1, original_times=1, patch_size=14, num_classes=1):
+        super().__init__()
+        self.clip_name = clip_name
+        self.shuffle_times = shuffle_times
+        self.original_times = original_times
+        self.patch_size = patch_size
+        self.model, _ = clip.load(clip_name, device="cpu")
+        self.register_hook()
+        dim = CHANNELS.get(f"{clip_name}-penultimate", CHANNELS[clip_name])
+        self.attention_head = TransformerAttention(dim, shuffle_times + original_times, last_dim=num_classes)
+        for p in self.model.parameters():
+            p.requires_grad = False
+        self.model.eval()
+
+    def register_hook(self):
+        def hook(module, _input, output):
+            self.features = torch.clone(output)
+        for name, module in self.model.visual.named_children():
+            if name == "ln_post":
+                module.register_forward_hook(hook)
+                break
+
+    def _shuffle_patches(self, x):
+        b, c, h, w = x.size()
+        p = self.patch_size
+        patches = F.unfold(x, kernel_size=p, stride=p)
+        perm = torch.randperm(patches.size(-1), device=patches.device)
+        shuffled = patches[:, :, perm]
+        return F.fold(shuffled, output_size=(h, w), kernel_size=p, stride=p)
+
+    @torch.no_grad()
+    def _encode_penultimate(self, x):
+        _ = self.model.encode_image(x)
+        feat = self.features
+        if feat.ndim == 3:
+            feat = feat[:, 0, :]
+        return feat
+
+    def forward(self, x):
+        feats = []
+        with torch.no_grad():
+            for _ in range(self.shuffle_times):
+                feats.append(self._encode_penultimate(self._shuffle_patches(x)))
+            f_orig = self._encode_penultimate(x)
+            for _ in range(self.original_times):
+                feats.append(f_orig.clone())
+        return self.attention_head(torch.stack(feats, dim=1))
 
 
 
@@ -323,6 +377,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--arch', type=str, default='res50')
     parser.add_argument('--ckpt', type=str, default='./pretrained_weights/fc_weights.pth')
+    parser.add_argument('--shuffle_times', type=int, default=1)
+    parser.add_argument('--original_times', type=int, default=1)
+    parser.add_argument('--patch_size', type=int, default=14)
 
     parser.add_argument('--result_folder', type=str, default='result', help='')
     parser.add_argument('--batch_size', type=int, default=128)
@@ -338,14 +395,31 @@ if __name__ == '__main__':
         shutil.rmtree(opt.result_folder)
     os.makedirs(opt.result_folder)
 
-    model_opt = SimpleNamespace(
-        arch=opt.arch,
-        head_type="fc",
-        penultimate_feature=False,
-    )
-    model = get_model(model_opt)
     state_dict = torch.load(opt.ckpt, map_location='cpu')
-    model.fc.load_state_dict(state_dict)
+    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    if isinstance(state_dict, dict) and any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+    is_attention_head_ckpt = isinstance(state_dict, dict) and "query.weight" in state_dict and "fc.weight" in state_dict
+    if is_attention_head_ckpt:
+        if not opt.arch.startswith("CLIP:"):
+            raise ValueError("Attention-head checkpoint is only supported with CLIP arch in validate.py")
+        model = CLIPShuffleAttentionEval(
+            clip_name=opt.arch[5:],
+            shuffle_times=opt.shuffle_times,
+            original_times=opt.original_times,
+            patch_size=opt.patch_size,
+        )
+        model.attention_head.load_state_dict(state_dict, strict=True)
+    else:
+        model_opt = SimpleNamespace(
+            arch=opt.arch,
+            head_type="fc",
+            penultimate_feature=False,
+        )
+        model = get_model(model_opt)
+        model.fc.load_state_dict(state_dict, strict=True)
     print ("Model loaded..")
     model.eval()
     model.cuda()

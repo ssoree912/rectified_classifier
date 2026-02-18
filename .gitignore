@@ -21,6 +21,7 @@ FAKE_IMAGES/
 # Python 캐시
 __pycache__/
 *.py[cod]
+*.cpython-*.pyc
 *$py.class
 *.so
 
