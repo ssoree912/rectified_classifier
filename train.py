@@ -1,8 +1,10 @@
 import os
 import numpy as np
 import pandas as pd
-os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+if "CUDA_DEVICE_ORDER" not in os.environ:
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
