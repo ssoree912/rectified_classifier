@@ -3,6 +3,7 @@ from ast import arg
 import os
 import csv
 from types import SimpleNamespace
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
@@ -274,6 +275,25 @@ def get_list(path, must_contain=''):
     return image_list
 
 
+def infer_fake_paths_from_real(real_path):
+    real_p = Path(real_path).resolve()
+    if not real_p.is_dir():
+        raise ValueError(f"real_path is not a directory: {real_path}")
+    parent = real_p.parent
+    fake_paths = []
+    for d in sorted(parent.iterdir()):
+        if not d.is_dir():
+            continue
+        if d == real_p:
+            continue
+        if d.name.startswith("."):
+            continue
+        fake_paths.append(str(d))
+    if not fake_paths:
+        raise ValueError(f"No sibling fake folders found beside {real_p}")
+    return fake_paths
+
+
 
 
 
@@ -373,6 +393,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--real_path', type=str, default=None, help='dir name or a pickle')
     parser.add_argument('--fake_path', type=str, default=None, help='dir name or a pickle')
+    parser.add_argument('--fake_paths', nargs='*', default=None, help='multiple fake dirs with shared real_path')
     parser.add_argument('--data_mode', type=str, default=None, help='wang2020 or ours')
     parser.add_argument('--max_sample', type=int, default=1000, help='only check this number of images for both fake/real')
 
@@ -425,7 +446,29 @@ if __name__ == '__main__':
     model.eval()
     model.cuda()
 
-    if (opt.real_path == None) or (opt.fake_path == None) or (opt.data_mode == None):
+    if opt.real_path is not None and opt.fake_paths:
+        data_mode = opt.data_mode or "ours"
+        dataset_paths = [
+            dict(
+                real_path=opt.real_path,
+                fake_path=fake_p,
+                data_mode=data_mode,
+                key=f"{os.path.basename(opt.real_path)}_vs_{os.path.basename(fake_p)}",
+            )
+            for fake_p in opt.fake_paths
+        ]
+    elif opt.real_path is not None and opt.fake_path is None and opt.data_mode is not None:
+        inferred_fake_paths = infer_fake_paths_from_real(opt.real_path)
+        dataset_paths = [
+            dict(
+                real_path=opt.real_path,
+                fake_path=fake_p,
+                data_mode=opt.data_mode,
+                key=f"{os.path.basename(opt.real_path)}_vs_{os.path.basename(fake_p)}",
+            )
+            for fake_p in inferred_fake_paths
+        ]
+    elif (opt.real_path == None) or (opt.fake_path == None) or (opt.data_mode == None):
         dataset_paths = DATASET_PATHS
     else:
         dataset_paths = [ dict(real_path=opt.real_path, fake_path=opt.fake_path, data_mode=opt.data_mode) ]
@@ -433,6 +476,8 @@ if __name__ == '__main__':
     results_rows = []
     y_pred_list = []
     y_true_list = []
+    all_preds = []
+    all_trues = []
 
 
     for dataset_path in (dataset_paths):
@@ -451,9 +496,19 @@ if __name__ == '__main__':
         val_out = validate(model, loader, find_thres=True)
         ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_thres = val_out[:8]
         y_pred, y_true = val_out[8], val_out[9]
+        real_name = (
+            os.path.basename(dataset_path['real_path'])
+            if isinstance(dataset_path['real_path'], str)
+            else "real_multi"
+        )
+        fake_name = (
+            os.path.basename(dataset_path['fake_path'])
+            if isinstance(dataset_path['fake_path'], str)
+            else "fake_multi"
+        )
         dataset_key = dataset_path.get(
             "key",
-            f"{os.path.basename(dataset_path['real_path'])}_vs_{os.path.basename(dataset_path['fake_path'])}",
+            f"{real_name}_vs_{fake_name}",
         )
         results_rows.append(
             dict(
@@ -477,6 +532,8 @@ if __name__ == '__main__':
         )
         y_pred_list.append(np.array(y_pred))
         y_true_list.append(np.array(y_true))
+        all_preds.append(np.array(y_pred))
+        all_trues.append(np.array(y_true))
 
         with open( os.path.join(opt.result_folder,'ap.txt'), 'a') as f:
             f.write(dataset_key+': ' + str(round(ap*100, 2))+'\n' )
@@ -485,23 +542,63 @@ if __name__ == '__main__':
             f.write(dataset_key+': ' + str(round(r_acc0*100, 2))+'  '+str(round(f_acc0*100, 2))+'  '+str(round(acc0*100, 2))+'\n' )
 
     if len(results_rows) > 0:
+        per_dataset_rows = list(results_rows)
+        overall_pred = np.concatenate(all_preds, axis=0)
+        overall_true = np.concatenate(all_trues, axis=0)
+        overall_ap = average_precision_score(overall_true, overall_pred)
+        overall_r_acc0, overall_f_acc0, overall_acc0 = calculate_acc(overall_true, overall_pred, 0.5)
+        overall_best_thres = find_best_threshold(overall_true, overall_pred)
+        overall_r_acc1, overall_f_acc1, overall_acc1 = calculate_acc(overall_true, overall_pred, overall_best_thres)
+        overall_row = {
+            "dataset": "overall",
+            "ap": float(overall_ap),
+            "ap_pct": float(overall_ap * 100.0),
+            "r_acc0": float(overall_r_acc0),
+            "r_acc0_pct": float(overall_r_acc0 * 100.0),
+            "f_acc0": float(overall_f_acc0),
+            "f_acc0_pct": float(overall_f_acc0 * 100.0),
+            "acc0": float(overall_acc0),
+            "acc0_pct": float(overall_acc0 * 100.0),
+            "r_acc1": float(overall_r_acc1),
+            "r_acc1_pct": float(overall_r_acc1 * 100.0),
+            "f_acc1": float(overall_f_acc1),
+            "f_acc1_pct": float(overall_f_acc1 * 100.0),
+            "acc1": float(overall_acc1),
+            "acc1_pct": float(overall_acc1 * 100.0),
+            "best_thres": float(overall_best_thres),
+        }
+        results_rows.append(overall_row)
+
+        with open( os.path.join(opt.result_folder,'ap.txt'), 'a') as f:
+            f.write("overall: " + str(round(overall_ap*100, 2)) + '\n' )
+        with open( os.path.join(opt.result_folder,'acc0.txt'), 'a') as f:
+            f.write(
+                "overall: "
+                + str(round(overall_r_acc0*100, 2))
+                + '  '
+                + str(round(overall_f_acc0*100, 2))
+                + '  '
+                + str(round(overall_acc0*100, 2))
+                + '\n'
+            )
+
         mean_row = {
             "dataset": "average",
-            "ap": float(np.mean([r["ap"] for r in results_rows])),
-            "ap_pct": float(np.mean([r["ap_pct"] for r in results_rows])),
-            "r_acc0": float(np.mean([r["r_acc0"] for r in results_rows])),
-            "r_acc0_pct": float(np.mean([r["r_acc0_pct"] for r in results_rows])),
-            "f_acc0": float(np.mean([r["f_acc0"] for r in results_rows])),
-            "f_acc0_pct": float(np.mean([r["f_acc0_pct"] for r in results_rows])),
-            "acc0": float(np.mean([r["acc0"] for r in results_rows])),
-            "acc0_pct": float(np.mean([r["acc0_pct"] for r in results_rows])),
-            "r_acc1": float(np.mean([r["r_acc1"] for r in results_rows])),
-            "r_acc1_pct": float(np.mean([r["r_acc1_pct"] for r in results_rows])),
-            "f_acc1": float(np.mean([r["f_acc1"] for r in results_rows])),
-            "f_acc1_pct": float(np.mean([r["f_acc1_pct"] for r in results_rows])),
-            "acc1": float(np.mean([r["acc1"] for r in results_rows])),
-            "acc1_pct": float(np.mean([r["acc1_pct"] for r in results_rows])),
-            "best_thres": float(np.mean([r["best_thres"] for r in results_rows])),
+            "ap": float(np.mean([r["ap"] for r in per_dataset_rows])),
+            "ap_pct": float(np.mean([r["ap_pct"] for r in per_dataset_rows])),
+            "r_acc0": float(np.mean([r["r_acc0"] for r in per_dataset_rows])),
+            "r_acc0_pct": float(np.mean([r["r_acc0_pct"] for r in per_dataset_rows])),
+            "f_acc0": float(np.mean([r["f_acc0"] for r in per_dataset_rows])),
+            "f_acc0_pct": float(np.mean([r["f_acc0_pct"] for r in per_dataset_rows])),
+            "acc0": float(np.mean([r["acc0"] for r in per_dataset_rows])),
+            "acc0_pct": float(np.mean([r["acc0_pct"] for r in per_dataset_rows])),
+            "r_acc1": float(np.mean([r["r_acc1"] for r in per_dataset_rows])),
+            "r_acc1_pct": float(np.mean([r["r_acc1_pct"] for r in per_dataset_rows])),
+            "f_acc1": float(np.mean([r["f_acc1"] for r in per_dataset_rows])),
+            "f_acc1_pct": float(np.mean([r["f_acc1_pct"] for r in per_dataset_rows])),
+            "acc1": float(np.mean([r["acc1"] for r in per_dataset_rows])),
+            "acc1_pct": float(np.mean([r["acc1_pct"] for r in per_dataset_rows])),
+            "best_thres": float(np.mean([r["best_thres"] for r in per_dataset_rows])),
         }
         df = pd.DataFrame(results_rows + [mean_row])
         df.to_excel(os.path.join(opt.result_folder, "validation.xlsx"), index=False)

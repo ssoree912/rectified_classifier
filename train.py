@@ -1,8 +1,10 @@
 import os
 import numpy as np
 import pandas as pd
-os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+if "CUDA_DEVICE_ORDER" not in os.environ:
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
@@ -40,9 +42,39 @@ def resolve_class_folders(root):
         fake_dir = os.path.join(root, fake_name)
         if os.path.isdir(real_dir) and os.path.isdir(fake_dir):
             return [real_dir], [fake_dir]
+
+    real_dir = os.path.join(root, "real")
+    if os.path.isdir(real_dir):
+        fake_dirs = []
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if not os.path.isdir(p):
+                continue
+            if name.lower() == "real":
+                continue
+            if name.startswith("."):
+                continue
+            fake_dirs.append(p)
+        if fake_dirs:
+            return [real_dir], fake_dirs
+
+    nature_dir = os.path.join(root, "nature")
+    if os.path.isdir(nature_dir):
+        fake_dirs = []
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if not os.path.isdir(p):
+                continue
+            if name.lower() == "nature":
+                continue
+            if name.startswith("."):
+                continue
+            fake_dirs.append(p)
+        if fake_dirs:
+            return [nature_dir], fake_dirs
     raise ValueError(
         f"Could not find class folders under {root}. "
-        "Expected (real,fake) or (nature,ai)."
+        "Expected (real,fake), (nature,ai), or (real + multiple fake folders)."
     )
 
 
@@ -72,6 +104,7 @@ if __name__ == '__main__':
         
     early_stopping = EarlyStopping(patience=opt.earlystop_epoch, delta=-0.001, verbose=True)
     start_time = time.time()
+    best_acc = -1.0
     print ("Length of data loader: %d" %(len(data_loader)))
     results_dict = {}
     for epoch in range(opt.niter):
@@ -87,7 +120,6 @@ if __name__ == '__main__':
 
         if epoch % opt.save_epoch_freq == 0:
             print('saving the model at the end of epoch %d' % (epoch))
-            model.save_networks( 'model_epoch_best.pth' )
             model.save_networks( 'model_epoch_%s.pth' % epoch )
 
         # Validation
@@ -124,6 +156,11 @@ if __name__ == '__main__':
         print(f"(average Val on all dataset @ epoch {epoch}) acc: {acc_list[-1]}; ap: {ap_list[-1]}")
         np.savez(os.path.join(opt.checkpoints_dir, opt.name, f'y_pred_eval_{epoch}.npz'), *y_pred_list)
         np.savez(os.path.join(opt.checkpoints_dir, opt.name, f'y_true_eval_{epoch}.npz'), *y_true_list)
+
+        if acc_list[-1] >= best_acc:
+            best_acc = acc_list[-1]
+            model.save_networks('model_epoch_best.pth')
+            print(f"Saved best checkpoint at epoch {epoch} with acc={best_acc}")
         
         # early stop using avg acc
         acc = acc_list[-1]

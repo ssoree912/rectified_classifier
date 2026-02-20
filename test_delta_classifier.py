@@ -43,7 +43,7 @@ def load_state_dict_clean(path, device):
 
 
 class ResidualCacheBinaryDataset(Dataset):
-    def __init__(self, root, max_items=None):
+    def __init__(self, root, max_items=None, fake_dirs=None):
         self.root = Path(root).resolve()
         if not self.root.exists():
             raise FileNotFoundError(f"residual_cache_root not found: {self.root}")
@@ -55,9 +55,9 @@ class ResidualCacheBinaryDataset(Dataset):
         if not fake_dir.is_dir():
             fake_dir = self.root / "ai"
 
-        fake_dirs = []
+        auto_fake_dirs = []
         if real_dir.is_dir() and fake_dir.is_dir():
-            fake_dirs = [fake_dir]
+            auto_fake_dirs = [fake_dir]
         elif real_dir.is_dir():
             for d in sorted(self.root.iterdir()):
                 if not d.is_dir():
@@ -66,9 +66,18 @@ class ResidualCacheBinaryDataset(Dataset):
                     continue
                 if d.name.startswith("."):
                     continue
-                fake_dirs.append(d)
+                auto_fake_dirs.append(d)
 
-        if not real_dir.is_dir() or not fake_dirs:
+        use_fake_dirs = auto_fake_dirs
+        if fake_dirs is not None:
+            use_fake_dirs = []
+            for d in fake_dirs:
+                p = Path(d)
+                if not p.is_absolute():
+                    p = self.root / p
+                use_fake_dirs.append(p.resolve())
+
+        if not real_dir.is_dir() or not use_fake_dirs:
             raise ValueError(
                 f"Could not find class folders under {self.root}. "
                 "Expected (real,fake), (nature,ai), or (real + multiple fake folders)."
@@ -77,7 +86,7 @@ class ResidualCacheBinaryDataset(Dataset):
         self.items = []
         for p in sorted(real_dir.rglob("*.pt")):
             self.items.append((p, 0))
-        for d in fake_dirs:
+        for d in use_fake_dirs:
             for p in sorted(d.rglob("*.pt")):
                 self.items.append((p, 1))
 
@@ -152,18 +161,23 @@ def main():
     device = "cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu"
     torch.backends.cudnn.benchmark = True
 
-    ds = ResidualCacheBinaryDataset(args.residual_cache_root, max_items=args.max_items)
-    dl_kwargs = dict(
-        dataset=ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device == "cuda"),
-        persistent_workers=(args.num_workers > 0),
-    )
-    if args.num_workers > 0:
-        dl_kwargs["prefetch_factor"] = args.prefetch_factor
-    dl = DataLoader(**dl_kwargs)
+    root = Path(args.residual_cache_root).resolve()
+    real_dir = root / "real"
+    if not real_dir.is_dir():
+        real_dir = root / "nature"
+    if not real_dir.is_dir():
+        raise ValueError(f"Could not find real/nature dir under: {root}")
+    fake_dirs = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        if d == real_dir:
+            continue
+        if d.name.startswith("."):
+            continue
+        fake_dirs.append(d)
+    if not fake_dirs:
+        raise ValueError(f"Could not find fake dirs under: {root}")
 
     rect = ResidualRectifierCNN(c_in=3, width=args.rect_width, depth=args.rect_depth).to(device)
     rect.load_state_dict(load_state_dict_clean(args.rect_ckpt, device), strict=True)
@@ -171,17 +185,97 @@ def main():
     clf = SmallCNN(c_in=3, width=args.clf_width).to(device)
     clf.load_state_dict(load_state_dict_clean(args.clf_ckpt, device), strict=True)
 
-    ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th, y_pred, y_true = evaluate(
-        rect=rect,
-        clf=clf,
-        loader=dl,
-        device=device,
-        threshold=args.threshold,
-        use_abs=args.use_abs,
+    results_rows = []
+    y_pred_list = []
+    y_true_list = []
+
+    for fake_dir in fake_dirs:
+        ds = ResidualCacheBinaryDataset(
+            args.residual_cache_root,
+            max_items=args.max_items,
+            fake_dirs=[fake_dir],
+        )
+        dl_kwargs = dict(
+            dataset=ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device == "cuda"),
+            persistent_workers=(args.num_workers > 0),
+        )
+        if args.num_workers > 0:
+            dl_kwargs["prefetch_factor"] = args.prefetch_factor
+        dl = DataLoader(**dl_kwargs)
+
+        ap, r_acc0, f_acc0, acc0, r_acc1, f_acc1, acc1, best_th, y_pred, y_true = evaluate(
+            rect=rect,
+            clf=clf,
+            loader=dl,
+            device=device,
+            threshold=args.threshold,
+            use_abs=args.use_abs,
+        )
+        dataset_name = fake_dir.name
+        print(
+            f"[{dataset_name}] AP={ap:.6f} "
+            f"ACC@{args.threshold:.3f}={acc0:.6f} "
+            f"ACC@best({best_th:.6f})={acc1:.6f}"
+        )
+
+        results_rows.append(
+            dict(
+                dataset=dataset_name,
+                ap=float(ap),
+                ap_pct=float(ap * 100.0),
+                r_acc0=float(r_acc0),
+                r_acc0_pct=float(r_acc0 * 100.0),
+                f_acc0=float(f_acc0),
+                f_acc0_pct=float(f_acc0 * 100.0),
+                acc0=float(acc0),
+                acc0_pct=float(acc0 * 100.0),
+                r_acc1=float(r_acc1),
+                r_acc1_pct=float(r_acc1 * 100.0),
+                f_acc1=float(f_acc1),
+                f_acc1_pct=float(f_acc1 * 100.0),
+                acc1=float(acc1),
+                acc1_pct=float(acc1 * 100.0),
+                best_thres=float(best_th),
+            )
+        )
+        y_pred_list.append(np.asarray(y_pred, dtype=np.float32))
+        y_true_list.append(np.asarray(y_true, dtype=np.float32))
+
+    all_pred = np.concatenate(y_pred_list, axis=0)
+    all_true = np.concatenate(y_true_list, axis=0)
+    overall_ap = average_precision_score(all_true, all_pred)
+    overall_r0, overall_f0, overall_acc0 = calculate_acc(all_true, all_pred, args.threshold)
+    overall_best_th = find_best_threshold(all_true, all_pred)
+    overall_r1, overall_f1, overall_acc1 = calculate_acc(all_true, all_pred, overall_best_th)
+    print(
+        f"[overall] AP={overall_ap:.6f} "
+        f"ACC@{args.threshold:.3f}={overall_acc0:.6f} "
+        f"ACC@best({overall_best_th:.6f})={overall_acc1:.6f}"
     )
-    print(f"AP: {ap:.6f}")
-    print(f"ACC@{args.threshold:.3f}: real={r_acc0:.6f} fake={f_acc0:.6f} total={acc0:.6f}")
-    print(f"ACC@best_th({best_th:.6f}): real={r_acc1:.6f} fake={f_acc1:.6f} total={acc1:.6f}")
+    results_rows.append(
+        dict(
+            dataset="overall",
+            ap=float(overall_ap),
+            ap_pct=float(overall_ap * 100.0),
+            r_acc0=float(overall_r0),
+            r_acc0_pct=float(overall_r0 * 100.0),
+            f_acc0=float(overall_f0),
+            f_acc0_pct=float(overall_f0 * 100.0),
+            acc0=float(overall_acc0),
+            acc0_pct=float(overall_acc0 * 100.0),
+            r_acc1=float(overall_r1),
+            r_acc1_pct=float(overall_r1 * 100.0),
+            f_acc1=float(overall_f1),
+            f_acc1_pct=float(overall_f1 * 100.0),
+            acc1=float(overall_acc1),
+            acc1_pct=float(overall_acc1 * 100.0),
+            best_thres=float(overall_best_th),
+        )
+    )
 
     if args.result_folder:
         result_dir = Path(args.result_folder)
@@ -193,81 +287,49 @@ def main():
             "residual_cache_root": str(Path(args.residual_cache_root).resolve()),
             "rect_ckpt": str(Path(args.rect_ckpt).resolve()),
             "clf_ckpt": str(Path(args.clf_ckpt).resolve()),
-            "num_samples": int(len(ds)),
+            "num_samples": int(len(all_true)),
             "threshold": float(args.threshold),
             "use_abs": bool(args.use_abs),
-            "ap": float(ap),
-            "acc0_real": float(r_acc0),
-            "acc0_fake": float(f_acc0),
-            "acc0_total": float(acc0),
-            "best_threshold": float(best_th),
-            "acc1_real": float(r_acc1),
-            "acc1_fake": float(f_acc1),
-            "acc1_total": float(acc1),
+            "results": results_rows,
         }
 
         with open(result_dir / f"{prefix}_metrics.json", "w", encoding="utf-8") as f:
             json.dump(metrics, f, ensure_ascii=True, indent=2)
 
         with open(result_dir / f"{prefix}_metrics.txt", "w", encoding="utf-8") as f:
-            f.write(f"AP: {ap:.6f}\n")
-            f.write(
-                f"ACC@{args.threshold:.3f}: real={r_acc0:.6f} fake={f_acc0:.6f} total={acc0:.6f}\n"
-            )
-            f.write(
-                f"ACC@best_th({best_th:.6f}): real={r_acc1:.6f} fake={f_acc1:.6f} total={acc1:.6f}\n"
-            )
+            for row in results_rows:
+                f.write(
+                    f"{row['dataset']}: "
+                    f"AP={row['ap']:.6f}, "
+                    f"ACC@{args.threshold:.3f}={row['acc0']:.6f}, "
+                    f"ACC@best_th({row['best_thres']:.6f})={row['acc1']:.6f}\n"
+                )
 
-        np.savez(
-            result_dir / f"{prefix}_predictions.npz",
-            y_pred=np.asarray(y_pred, dtype=np.float32),
-            y_true=np.asarray(y_true, dtype=np.float32),
-        )
+        np.savez(result_dir / f"{prefix}_predictions.npz", *y_pred_list, all=all_pred)
 
-        # Unified output format with validate.py
-        df = pd.DataFrame(
-            [
-                dict(
-                    dataset=Path(args.residual_cache_root).name,
-                    ap=float(ap),
-                    ap_pct=float(ap * 100.0),
-                    r_acc0=float(r_acc0),
-                    r_acc0_pct=float(r_acc0 * 100.0),
-                    f_acc0=float(f_acc0),
-                    f_acc0_pct=float(f_acc0 * 100.0),
-                    acc0=float(acc0),
-                    acc0_pct=float(acc0 * 100.0),
-                    r_acc1=float(r_acc1),
-                    r_acc1_pct=float(r_acc1 * 100.0),
-                    f_acc1=float(f_acc1),
-                    f_acc1_pct=float(f_acc1 * 100.0),
-                    acc1=float(acc1),
-                    acc1_pct=float(acc1 * 100.0),
-                    best_thres=float(best_th),
-                ),
-                dict(
-                    dataset="average",
-                    ap=float(ap),
-                    ap_pct=float(ap * 100.0),
-                    r_acc0=float(r_acc0),
-                    r_acc0_pct=float(r_acc0 * 100.0),
-                    f_acc0=float(f_acc0),
-                    f_acc0_pct=float(f_acc0 * 100.0),
-                    acc0=float(acc0),
-                    acc0_pct=float(acc0 * 100.0),
-                    r_acc1=float(r_acc1),
-                    r_acc1_pct=float(r_acc1 * 100.0),
-                    f_acc1=float(f_acc1),
-                    f_acc1_pct=float(f_acc1 * 100.0),
-                    acc1=float(acc1),
-                    acc1_pct=float(acc1 * 100.0),
-                    best_thres=float(best_th),
-                ),
-            ]
+        per_rows = [r for r in results_rows if r["dataset"] != "overall"]
+        mean_row = dict(
+            dataset="average",
+            ap=float(np.mean([r["ap"] for r in per_rows])),
+            ap_pct=float(np.mean([r["ap_pct"] for r in per_rows])),
+            r_acc0=float(np.mean([r["r_acc0"] for r in per_rows])),
+            r_acc0_pct=float(np.mean([r["r_acc0_pct"] for r in per_rows])),
+            f_acc0=float(np.mean([r["f_acc0"] for r in per_rows])),
+            f_acc0_pct=float(np.mean([r["f_acc0_pct"] for r in per_rows])),
+            acc0=float(np.mean([r["acc0"] for r in per_rows])),
+            acc0_pct=float(np.mean([r["acc0_pct"] for r in per_rows])),
+            r_acc1=float(np.mean([r["r_acc1"] for r in per_rows])),
+            r_acc1_pct=float(np.mean([r["r_acc1_pct"] for r in per_rows])),
+            f_acc1=float(np.mean([r["f_acc1"] for r in per_rows])),
+            f_acc1_pct=float(np.mean([r["f_acc1_pct"] for r in per_rows])),
+            acc1=float(np.mean([r["acc1"] for r in per_rows])),
+            acc1_pct=float(np.mean([r["acc1_pct"] for r in per_rows])),
+            best_thres=float(np.mean([r["best_thres"] for r in per_rows])),
         )
+        df = pd.DataFrame(results_rows + [mean_row])
         df.to_excel(result_dir / "validation.xlsx", index=False)
-        np.savez(result_dir / "validation_ypred.npz", np.asarray(y_pred, dtype=np.float32))
-        np.savez(result_dir / "validation_ytrue.npz", np.asarray(y_true, dtype=np.float32))
+        np.savez(result_dir / "validation_ypred.npz", *y_pred_list, all=all_pred)
+        np.savez(result_dir / "validation_ytrue.npz", *y_true_list, all=all_true)
         print(f"Saved results to: {result_dir}")
 
 
