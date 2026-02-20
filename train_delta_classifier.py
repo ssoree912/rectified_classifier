@@ -1,11 +1,12 @@
 import argparse
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, average_precision_score
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from dataset.sr_binary_dataset import SRBinaryDataset
@@ -13,17 +14,75 @@ from models.residual_rectifier import ResidualRectifierCNN
 from models.delta_classifier import SmallCNN
 
 
+VALID_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+class ResidualCacheBinaryDataset(Dataset):
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        if not self.root.exists():
+            raise FileNotFoundError(f"residual_cache_root not found: {self.root}")
+
+        real_dir = self.root / "real"
+        fake_dir = self.root / "fake"
+        if not real_dir.is_dir():
+            real_dir = self.root / "nature"
+        if not fake_dir.is_dir():
+            fake_dir = self.root / "ai"
+
+        fake_dirs = []
+        if real_dir.is_dir() and fake_dir.is_dir():
+            fake_dirs = [fake_dir]
+        elif real_dir.is_dir():
+            for d in sorted(self.root.iterdir()):
+                if not d.is_dir():
+                    continue
+                if d == real_dir:
+                    continue
+                if d.name.startswith("."):
+                    continue
+                fake_dirs.append(d)
+
+        if not real_dir.is_dir() or not fake_dirs:
+            raise ValueError(
+                f"Could not find class folders under {self.root}. "
+                "Expected (real,fake), (nature,ai), or (real + multiple fake folders)."
+            )
+
+        self.items = []
+        for p in sorted(real_dir.rglob("*.pt")):
+            self.items.append((p, 0))
+        for d in fake_dirs:
+            for p in sorted(d.rglob("*.pt")):
+                self.items.append((p, 1))
+        if not self.items:
+            raise ValueError(f"No .pt residual files found under: {self.root}")
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        p, y = self.items[idx]
+        r = torch.load(p, map_location="cpu")
+        if not torch.is_tensor(r):
+            raise TypeError(f"Expected tensor in {p}, got {type(r)}")
+        return r.float(), torch.tensor(y, dtype=torch.long)
+
+
 def parse_args():
     p = argparse.ArgumentParser("Train classifier on delta = r - R(r)")
-    p.add_argument("--data_root", type=str, required=True)
-    p.add_argument("--sr_cache_root", type=str, required=True)
+    p.add_argument("--data_root", type=str, default=None)
+    p.add_argument("--sr_cache_root", type=str, default=None)
+    p.add_argument("--residual_cache_root", type=str, default=None)
     p.add_argument("--val_data_root", type=str, nargs="*", default=None)
     p.add_argument("--val_sr_cache_root", type=str, default=None)
+    p.add_argument("--val_residual_cache_root", type=str, nargs="*", default=None)
     p.add_argument("--rect_ckpt", type=str, required=True)
     p.add_argument("--save_path", type=str, default="clf_delta.pth")
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--prefetch_factor", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--amp", action="store_true")
@@ -39,6 +98,15 @@ def parse_args():
 @torch.no_grad()
 def make_delta(x, x_sr, rectifier, use_abs=False):
     r = x_sr - x
+    r_hat = rectifier(r)
+    delta = r - r_hat
+    if use_abs:
+        delta = delta.abs()
+    return delta
+
+
+@torch.no_grad()
+def make_delta_from_residual(r, rectifier, use_abs=False):
     r_hat = rectifier(r)
     delta = r - r_hat
     if use_abs:
@@ -81,11 +149,18 @@ def evaluate(clf, rect, loader, device, use_abs=False, threshold=0.5):
     y_true = []
     y_pred = []
     pbar = tqdm(loader, desc="[Eval]", leave=False)
-    for x, x_sr, y in pbar:
-        x = x.to(device, non_blocking=True)
-        x_sr = x_sr.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True).float()
-        delta = make_delta(x, x_sr, rect, use_abs=use_abs)
+    for batch in pbar:
+        if len(batch) == 3:
+            x, x_sr, y = batch
+            x = x.to(device, non_blocking=True)
+            x_sr = x_sr.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).float()
+            delta = make_delta(x, x_sr, rect, use_abs=use_abs)
+        else:
+            r, y = batch
+            r = r.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True).float()
+            delta = make_delta_from_residual(r, rect, use_abs=use_abs)
         logits = clf(delta).squeeze(1)
         y_pred.extend(logits.sigmoid().detach().cpu().tolist())
         y_true.extend(y.detach().cpu().tolist())
@@ -109,30 +184,61 @@ def main():
     device = "cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu"
     torch.backends.cudnn.benchmark = True
 
-    ds = SRBinaryDataset(args.data_root, args.sr_cache_root, image_size=args.image_size)
-    dl = DataLoader(
-        ds,
+    use_residual_cache = args.residual_cache_root is not None
+    if use_residual_cache:
+        print(f"Using residual cache for train: {args.residual_cache_root}")
+        ds = ResidualCacheBinaryDataset(args.residual_cache_root)
+    else:
+        if not args.data_root or not args.sr_cache_root:
+            raise ValueError("Either --residual_cache_root OR both --data_root and --sr_cache_root are required.")
+        ds = SRBinaryDataset(args.data_root, args.sr_cache_root, image_size=args.image_size)
+
+    dl_kwargs = dict(
+        dataset=ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=(device == "cuda"),
         persistent_workers=(args.num_workers > 0),
     )
+    if args.num_workers > 0:
+        dl_kwargs["prefetch_factor"] = args.prefetch_factor
+    dl = DataLoader(**dl_kwargs)
 
     val_loaders = []
-    if args.val_data_root:
-        val_sr_cache_root = args.val_sr_cache_root or args.sr_cache_root
-        for root in args.val_data_root:
-            vds = SRBinaryDataset(root, val_sr_cache_root, image_size=args.image_size)
-            vdl = DataLoader(
-                vds,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=(device == "cuda"),
-                persistent_workers=(args.num_workers > 0),
-            )
-            val_loaders.append((root, vdl))
+    if use_residual_cache:
+        if args.val_residual_cache_root:
+            for root in args.val_residual_cache_root:
+                vds = ResidualCacheBinaryDataset(root)
+                vdl_kwargs = dict(
+                    dataset=vds,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.num_workers,
+                    pin_memory=(device == "cuda"),
+                    persistent_workers=(args.num_workers > 0),
+                )
+                if args.num_workers > 0:
+                    vdl_kwargs["prefetch_factor"] = args.prefetch_factor
+                vdl = DataLoader(**vdl_kwargs)
+                val_loaders.append((root, vdl))
+    else:
+        if args.val_data_root:
+            val_sr_cache_root = args.val_sr_cache_root or args.sr_cache_root
+            for root in args.val_data_root:
+                vds = SRBinaryDataset(root, val_sr_cache_root, image_size=args.image_size)
+                vdl_kwargs = dict(
+                    dataset=vds,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.num_workers,
+                    pin_memory=(device == "cuda"),
+                    persistent_workers=(args.num_workers > 0),
+                )
+                if args.num_workers > 0:
+                    vdl_kwargs["prefetch_factor"] = args.prefetch_factor
+                vdl = DataLoader(**vdl_kwargs)
+                val_loaders.append((root, vdl))
 
     rect = ResidualRectifierCNN(c_in=3, width=args.rect_width, depth=args.rect_depth).to(device)
     rect.load_state_dict(load_state_dict_clean(args.rect_ckpt, device))
@@ -152,13 +258,20 @@ def main():
         clf.train()
         total = 0.0
         pbar = tqdm(dl, desc=f"[Classifier] epoch {ep + 1}/{args.epochs}")
-        for step, (x, x_sr, y) in enumerate(pbar, start=1):
-            x = x.to(device, non_blocking=True)
-            x_sr = x_sr.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).float().unsqueeze(1)
-
-            with torch.no_grad():
-                delta = make_delta(x, x_sr, rect, use_abs=args.use_abs)
+        for step, batch in enumerate(pbar, start=1):
+            if len(batch) == 3:
+                x, x_sr, y = batch
+                x = x.to(device, non_blocking=True)
+                x_sr = x_sr.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True).float().unsqueeze(1)
+                with torch.no_grad():
+                    delta = make_delta(x, x_sr, rect, use_abs=args.use_abs)
+            else:
+                r, y = batch
+                r = r.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True).float().unsqueeze(1)
+                with torch.no_grad():
+                    delta = make_delta_from_residual(r, rect, use_abs=args.use_abs)
 
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(args.amp and device == "cuda")):
