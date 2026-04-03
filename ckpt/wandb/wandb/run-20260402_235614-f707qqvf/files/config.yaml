@@ -1,0 +1,118 @@
+_wandb:
+    value:
+        cli_version: 0.24.2
+        e:
+            hxp7shyw1unhk5wxirrt7gex7qrk4x8h:
+                args:
+                    - --img_dir
+                    - /workspace/hd/data/rine/train
+                    - --sr_cache_root
+                    - /workspace/hd/data/rine_sr/train
+                    - --path_contains
+                    - 0_real
+                    - --save_path
+                    - /workspace/rectified_classifier/ckpt/rectifier_real_sr_bs16.pth
+                    - --batch_size
+                    - "16"
+                    - --num_workers
+                    - "8"
+                    - --epochs
+                    - "50"
+                    - --save_every
+                    - "1"
+                    - --log_every
+                    - "100"
+                    - --device
+                    - cuda:0
+                    - --wandb
+                    - --wandb_mode
+                    - online
+                    - --wandb_project
+                    - rectified-classifier
+                    - --wandb_run_name
+                    - real_sr_rectifier_bs16_online
+                codePath: train_rectifier.py
+                codePathLocal: train_rectifier.py
+                cpu_count: 64
+                cpu_count_logical: 128
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "1967317549056"
+                        used: "1789677916160"
+                email: solhee0912@gmail.com
+                executable: /opt/conda/envs/D3/bin/python
+                git:
+                    commit: 6646f184fbc628a015650d70793eaf081549e15d
+                    remote: https://github.com/ssoree912/rectified_classifier.git
+                gpu: NVIDIA RTX A6000
+                gpu_count: 3
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-436e27b8-b4d0-a98f-701c-a17d1c2924f0
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-a563d420-260b-e413-31c3-9362254a5680
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-0cec2205-8b9f-33df-958c-0a505a9b7fd5
+                host: 2970b6753b2e
+                memory:
+                    total: "269698289664"
+                os: Linux-6.8.0-78-generic-x86_64-with-glibc2.10
+                program: train_rectifier.py
+                python: CPython 3.8.0
+                root: /workspace/rectified_classifier/ckpt/wandb
+                startedAt: "2026-04-02T23:56:14.711680Z"
+                writerId: hxp7shyw1unhk5wxirrt7gex7qrk4x8h
+        m: []
+        python_version: 3.8.0
+        t:
+            "1":
+                - 1
+                - 41
+                - 63
+            "2":
+                - 1
+                - 41
+                - 63
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.8.0
+            "5": 0.24.2
+            "12": 0.24.2
+            "13": linux-x86_64
+batch_size:
+    value: 16
+dataset_size:
+    value: 360059
+device:
+    value: cuda:0
+epochs:
+    value: 50
+image_size:
+    value: 256
+img_dir:
+    value: /workspace/hd/data/rine/train
+lr:
+    value: 0.0002
+num_workers:
+    value: 8
+path_contains:
+    value:
+        - 0_real
+save_every:
+    value: 1
+sr_cache_root:
+    value: /workspace/hd/data/rine_sr/train
+steps_per_epoch:
+    value: 22504

@@ -28,6 +28,18 @@ def parse_args():
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--max_items", type=int, default=None)
     parser.add_argument("--log_every", type=int, default=100)
+    parser.add_argument(
+        "--path_contains",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Only process images whose full path contains any of these substrings.",
+    )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Process the discovered image list in reverse order.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +55,18 @@ def list_images(root: Path):
         if p.is_file() and p.suffix.lower() in VALID_EXTS:
             paths.append(p)
     return sorted(paths)
+
+
+def filter_images(paths, path_contains=None):
+    if not path_contains:
+        return paths
+
+    filtered = []
+    for p in paths:
+        path_str = str(p)
+        if any(token in path_str for token in path_contains):
+            filtered.append(p)
+    return filtered
 
 
 def build_output_path(src_path: Path, input_root: Path, output_root: Path, save_ext: str):
@@ -80,6 +104,9 @@ def main():
     )
 
     paths = list_images(input_root)
+    paths = filter_images(paths, args.path_contains)
+    if args.reverse:
+        paths = list(reversed(paths))
     if args.max_items is not None:
         paths = paths[: args.max_items]
     if not paths:
@@ -92,6 +119,9 @@ def main():
 
     print(f"[SR Cache] input_root={input_root}")
     print(f"[SR Cache] output_root={output_root}")
+    if args.path_contains:
+        print(f"[SR Cache] path_contains={args.path_contains}")
+    print(f"[SR Cache] reverse={args.reverse}")
     print(f"[SR Cache] total_images={total}")
 
     for i, src_path in enumerate(paths, start=1):
