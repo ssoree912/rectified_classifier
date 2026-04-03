@@ -8,11 +8,14 @@ class BaseOptions():
         self.initialized = False
 
     def initialize(self, parser):
-
         parser.add_argument('--head_type', default='attention')
         parser.add_argument('--no_augment', action='store_true', default=False)
         parser.add_argument('--patch_base', action='store_true', default=False)
         parser.add_argument('--rectifier_ckpt', type=str, default=None, help='path to trained rectifier checkpoint')
+        parser.add_argument('--rectifier_mode', type=str, default='pixel', choices=['pixel', 'latent'], help='rectifier operating space')
+        parser.add_argument('--latent_view_mode', type=str, default='delta', choices=['delta', 'rectified', 'sr'], help='which latent view to pair with the original latent for attention')
+        parser.add_argument('--latent_hidden_dim', type=int, default=2048, help='fallback hidden size when loading latent rectifier checkpoints without metadata')
+        parser.add_argument('--latent_depth', type=int, default=3, help='fallback depth when loading latent rectifier checkpoints without metadata')
         parser.add_argument('--sr_model_name', type=str, default='RealESRGAN_x4plus', help='Real-ESRGAN model name')
         parser.add_argument('--sr_scale', type=int, default=4, help='SR scale factor')
         parser.add_argument('--sr_tile', type=int, default=512, help='SR tile size for Real-ESRGAN')
@@ -21,36 +24,26 @@ class BaseOptions():
         parser.add_argument('--resume_path', type=str, default=None)
         parser.add_argument('--load_whole_model', action='store_true', default=False)
         parser.add_argument('--scale', type=float, default=1.0)
-        
-
-
-        
-
-
-
-
 
         parser.add_argument('--mode', default='binary')
         parser.add_argument('--arch', type=str, default='res50', help='see my_models/__init__.py')
-        parser.add_argument('--fix_backbone', action='store_true')  
+        parser.add_argument('--fix_backbone', action='store_true')
 
-        # data augmentation
         parser.add_argument('--rz_interp', default='bilinear')
         parser.add_argument('--blur_prob', type=float, default=0.5)
         parser.add_argument('--blur_sig', default='0.0,3.0')
         parser.add_argument('--jpg_prob', type=float, default=0.5)
         parser.add_argument('--jpg_method', default='cv2,pil')
         parser.add_argument('--jpg_qual', default='30,100')
-        
-         
+
         parser.add_argument('--real_list_path', default=None, help='only used if data_mode==ours: path for the list of real images, which should contain train.pickle and val.pickle')
         parser.add_argument('--fake_list_path', default=None, help='only used if data_mode==ours: path for the list of fake images, which should contain train.pickle and val.pickle')
         parser.add_argument('--wang2020_data_path', default=None, help='only used if data_mode==wang2020 it should contain train and test folders')
-        parser.add_argument('--data_mode',  default='ours', help='wang2020 or ours')
+        parser.add_argument('--data_mode', default='ours', help='wang2020 or ours')
         parser.add_argument('--data_label', default='train', help='label to decide whether train or validation dataset')
         parser.add_argument('--weight_decay', type=float, default=0.0, help='loss weight for l2 reg')
-        
-        parser.add_argument('--class_bal', action='store_true') # what is this ?
+
+        parser.add_argument('--class_bal', action='store_true')
         parser.add_argument('--batch_size', type=int, default=256, help='input batch size')
         parser.add_argument('--loadSize', type=int, default=256, help='scale images to this size')
         parser.add_argument('--cropSize', type=int, default=224, help='then crop to this size')
@@ -68,16 +61,12 @@ class BaseOptions():
         return parser
 
     def gather_options(self):
-        # initialize parser with basic options
         if not self.initialized:
-            parser = argparse.ArgumentParser(
-                formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+            parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
             parser = self.initialize(parser)
 
-        # get the basic options
         opt, _ = parser.parse_known_args()
         self.parser = parser
-
         return parser.parse_args()
 
     def print_options(self, opt):
@@ -92,7 +81,6 @@ class BaseOptions():
         message += '----------------- End -------------------'
         print(message)
 
-        # save to the disk
         expr_dir = os.path.join(opt.checkpoints_dir, opt.name)
         if not os.path.exists(expr_dir):
             os.makedirs(expr_dir)
@@ -102,11 +90,9 @@ class BaseOptions():
             opt_file.write('\n')
 
     def parse(self, print_options=True):
-
         opt = self.gather_options()
-        opt.isTrain = self.isTrain   # train or test
+        opt.isTrain = self.isTrain
 
-        # process opt.suffix
         if opt.suffix:
             suffix = ('_' + opt.suffix.format(**vars(opt))) if opt.suffix != '' else ''
             opt.name = opt.name + suffix
@@ -114,18 +100,15 @@ class BaseOptions():
         if print_options:
             self.print_options(opt)
 
-        # set gpu ids
         str_ids = opt.gpu_ids.split(',')
         opt.gpu_ids = []
         for str_id in str_ids:
-            id = int(str_id)
-            if id >= 0:
-                opt.gpu_ids.append(id)
+            gpu_id = int(str_id)
+            if gpu_id >= 0:
+                opt.gpu_ids.append(gpu_id)
         if len(opt.gpu_ids) > 0:
             torch.cuda.set_device(opt.gpu_ids[0])
 
-        # additional
-        #opt.classes = opt.classes.split(',')
         opt.rz_interp = opt.rz_interp.split(',')
         opt.blur_sig = [float(s) for s in opt.blur_sig.split(',')]
         opt.jpg_method = opt.jpg_method.split(',')
