@@ -51,3 +51,10 @@ Thumbs.db
 *_ypred.npz
 *_ytrue.npz
 baseline_predication_for_pr_roc_curve.pth
+# Weights & Biases
+wandb/
+ckpt/wandb/
+
+# Python cache (nested)
+**/__pycache__/
+
