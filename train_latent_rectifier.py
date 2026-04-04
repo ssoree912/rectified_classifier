@@ -11,7 +11,14 @@ from tqdm import tqdm
 
 from dataset.latent_rectify_dataset import LatentRectifyDataset
 from dataset.sr_rectify_dataset import SRRectifyDataset
-from models.latent_rectifier import CLIPPenultimateEncoder, LatentRectifierMLP, TokenMapRectifierCNN, clip_input_size
+from models.latent_rectifier import (
+    CLIPPenultimateEncoder,
+    DEFAULT_TOKEN_MAP_CHANNELS,
+    DEFAULT_TOKEN_MAP_GRID,
+    LatentRectifierMLP,
+    TokenMapRectifierCNN,
+    clip_input_size,
+)
 
 try:
     import wandb
@@ -34,7 +41,9 @@ def parse_args():
     parser.add_argument("--resume_epoch", type=int, default=None, help="Resume from the checkpoint saved at the end of this 1-based epoch number")
     parser.add_argument("--arch", type=str, default="ViT-L/14", help="CLIP backbone used to define the latent space")
     parser.add_argument("--image_size", type=int, default=0, help="Input resize for paired images; <=0 uses the CLIP default size")
-    parser.add_argument("--latent_kind", type=str, choices=["cls", "gap", "token_map"], default="cls")
+    parser.add_argument("--latent_kind", type=str, choices=["cls", "gap", "token_map"], default="token_map")
+    parser.add_argument("--token_map_channels", type=int, default=DEFAULT_TOKEN_MAP_CHANNELS, help="Compressed token-map channel count; <=0 keeps the original token width")
+    parser.add_argument("--token_map_grid", type=int, default=DEFAULT_TOKEN_MAP_GRID, help="Compressed token-map spatial size; <=0 keeps the original token grid")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
@@ -230,6 +239,8 @@ def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resum
             "arch": args.arch,
             "image_size": args.image_size,
             "latent_kind": latent_kind,
+            "token_map_channels": args.token_map_channels,
+            "token_map_grid": args.token_map_grid,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
             "prefetch_factor": args.prefetch_factor,
@@ -302,7 +313,10 @@ def resolve_training_data(args):
     )
     encoder = CLIPPenultimateEncoder(args.arch)
     if args.latent_kind == "token_map":
-        feature_dim, grid_size = encoder.infer_token_map_shape()
+        feature_dim, grid_size = encoder.infer_token_map_shape(
+            compress_channels=args.token_map_channels,
+            compress_grid=args.token_map_grid,
+        )
         rectifier_kind = "token_map_cnn"
     else:
         feature_dim = encoder.infer_feature_dim()
@@ -395,6 +409,9 @@ def main():
     print(f"[LatentRectifier] arch={args.arch}")
     print(f"[LatentRectifier] image_size={args.image_size}")
     print(f"[LatentRectifier] latent_kind={latent_kind}")
+    if latent_kind == "token_map":
+        print(f"[LatentRectifier] token_map_channels={args.token_map_channels}")
+        print(f"[LatentRectifier] token_map_grid={args.token_map_grid}")
     print(f"[LatentRectifier] rectifier_kind={rectifier_kind}")
     print(f"[LatentRectifier] feature_dim={feature_dim}")
     print(f"[LatentRectifier] grid_size={grid_size}")
@@ -466,7 +483,12 @@ def main():
                     x_sr_clip = normalize_for_clip(x_sr)
                     with torch.no_grad():
                         with autocast(enabled=use_amp):
-                            z_all = encoder.encode_latent(torch.cat([x_clip, x_sr_clip], dim=0), latent_kind=latent_kind)
+                            z_all = encoder.encode_latent(
+                                torch.cat([x_clip, x_sr_clip], dim=0),
+                                latent_kind=latent_kind,
+                                token_map_channels=args.token_map_channels,
+                                token_map_grid=args.token_map_grid,
+                            )
                             z, z_sr = z_all.chunk(2, dim=0)
                     z = z.float()
                     z_sr = z_sr.float()

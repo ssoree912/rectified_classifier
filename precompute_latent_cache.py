@@ -7,7 +7,12 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import torchvision.transforms as T
 
-from models.latent_rectifier import CLIPPenultimateEncoder, clip_input_size
+from models.latent_rectifier import (
+    CLIPPenultimateEncoder,
+    DEFAULT_TOKEN_MAP_CHANNELS,
+    DEFAULT_TOKEN_MAP_GRID,
+    clip_input_size,
+)
 
 
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -21,7 +26,19 @@ def parse_args():
     parser.add_argument("--output_root", type=str, required=True, help="Root directory to store latent `.pt` files")
     parser.add_argument("--arch", type=str, default="ViT-L/14", help="CLIP backbone used to define the latent space")
     parser.add_argument("--image_size", type=int, default=0, help="Resize before CLIP encoding; <=0 uses the CLIP default size")
-    parser.add_argument("--latent_kind", type=str, choices=["cls", "gap", "token_map"], default="cls")
+    parser.add_argument("--latent_kind", type=str, choices=["cls", "gap", "token_map"], default="token_map")
+    parser.add_argument(
+        "--token_map_channels",
+        type=int,
+        default=DEFAULT_TOKEN_MAP_CHANNELS,
+        help="Compressed channel count for token-map caching; <=0 keeps the original channel count",
+    )
+    parser.add_argument(
+        "--token_map_grid",
+        type=int,
+        default=DEFAULT_TOKEN_MAP_GRID,
+        help="Compressed spatial grid size for token-map caching; <=0 keeps the original grid size",
+    )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -59,6 +76,11 @@ def atomic_torch_save(obj, path: Path):
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(obj, tmp)
     tmp.replace(path)
+
+
+def normalize_optional_size(value: int):
+    value = int(value)
+    return value if value > 0 else None
 
 
 class ImagePathDataset(Dataset):
@@ -123,8 +145,13 @@ class ImagePathDataset(Dataset):
         return x, str(rel)
 
 
-def encode_batch(encoder: CLIPPenultimateEncoder, x_clip: torch.Tensor, latent_kind: str):
-    return encoder.encode_latent(x_clip, latent_kind=latent_kind)
+def encode_batch(encoder: CLIPPenultimateEncoder, x_clip: torch.Tensor, args):
+    return encoder.encode_latent(
+        x_clip,
+        latent_kind=args.latent_kind,
+        token_map_channels=normalize_optional_size(args.token_map_channels),
+        token_map_grid=normalize_optional_size(args.token_map_grid),
+    )
 
 
 def main():
@@ -154,8 +181,17 @@ def main():
 
     encoder = CLIPPenultimateEncoder(args.arch).to(device)
     encoder.eval()
+
+    raw_feature_dim = None
+    raw_grid_size = None
+    token_map_channels = normalize_optional_size(args.token_map_channels)
+    token_map_grid = normalize_optional_size(args.token_map_grid)
     if args.latent_kind == "token_map":
-        feature_dim, grid_size = encoder.infer_token_map_shape()
+        raw_feature_dim, raw_grid_size = encoder.infer_token_map_shape()
+        feature_dim, grid_size = encoder.infer_token_map_shape(
+            compress_channels=token_map_channels,
+            compress_grid=token_map_grid,
+        )
         latent_shape = (feature_dim, grid_size, grid_size)
     else:
         feature_dim = encoder.infer_feature_dim()
@@ -174,6 +210,11 @@ def main():
             "latent_shape": latent_shape,
             "save_dtype": args.save_dtype,
             "img_dir": str(Path(args.img_dir).resolve()),
+            "source_feature_dim": raw_feature_dim if raw_feature_dim is not None else feature_dim,
+            "source_grid_size": raw_grid_size if raw_grid_size is not None else grid_size,
+            "token_map_channels": token_map_channels,
+            "token_map_grid": token_map_grid,
+            "compressed_token_map": args.latent_kind == "token_map",
         },
         meta_path,
     )
@@ -183,6 +224,11 @@ def main():
     print(f"[LatentCache] arch={args.arch}")
     print(f"[LatentCache] image_size={args.image_size}")
     print(f"[LatentCache] latent_kind={args.latent_kind}")
+    if args.latent_kind == "token_map":
+        print(f"[LatentCache] source_feature_dim={raw_feature_dim}")
+        print(f"[LatentCache] source_grid_size={raw_grid_size}")
+        print(f"[LatentCache] token_map_channels={token_map_channels}")
+        print(f"[LatentCache] token_map_grid={token_map_grid}")
     print(f"[LatentCache] feature_dim={feature_dim}")
     print(f"[LatentCache] grid_size={grid_size}")
     print(f"[LatentCache] save_dtype={args.save_dtype}")
@@ -194,7 +240,7 @@ def main():
             x = x.to(device, non_blocking=True)
             x_clip = normalize_for_clip(x)
             with torch.cuda.amp.autocast(enabled=use_amp):
-                latents = encode_batch(encoder, x_clip, latent_kind=args.latent_kind).to(dtype=save_dtype)
+                latents = encode_batch(encoder, x_clip, args=args).to(dtype=save_dtype)
 
             for latent, rel_str in zip(latents, rel_paths):
                 rel = Path(rel_str)

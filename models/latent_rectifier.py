@@ -2,8 +2,13 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .clip import clip
+
+
+DEFAULT_TOKEN_MAP_CHANNELS = 128
+DEFAULT_TOKEN_MAP_GRID = 8
 
 
 def clip_input_size(name: str) -> int:
@@ -22,6 +27,13 @@ def _group_count(channels: int) -> int:
         if channels % groups == 0:
             return groups
     return 1
+
+
+def _normalize_optional_size(value):
+    if value is None:
+        return None
+    value = int(value)
+    return value if value > 0 else None
 
 
 def extract_clip_visual_tokens(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -78,6 +90,32 @@ def tokens_to_patch_map(tokens: torch.Tensor) -> torch.Tensor:
     return patch_map.permute(0, 3, 1, 2).contiguous()
 
 
+def compress_token_map(
+    patch_map: torch.Tensor,
+    out_channels: int = DEFAULT_TOKEN_MAP_CHANNELS,
+    out_grid: int = DEFAULT_TOKEN_MAP_GRID,
+) -> torch.Tensor:
+    if patch_map.ndim != 4:
+        raise ValueError(f"Expected patch map with shape (B, C, H, W), got {tuple(patch_map.shape)}")
+
+    out_channels = _normalize_optional_size(out_channels)
+    out_grid = _normalize_optional_size(out_grid)
+    z = patch_map
+
+    if out_grid is not None and (z.shape[-2] != out_grid or z.shape[-1] != out_grid):
+        z = F.adaptive_avg_pool2d(z, output_size=(out_grid, out_grid))
+
+    if out_channels is not None and z.shape[1] != out_channels:
+        if z.shape[1] % out_channels != 0:
+            raise ValueError(
+                f"Channel compression expects the input channel count to be divisible by out_channels: {z.shape[1]} vs {out_channels}"
+            )
+        group = z.shape[1] // out_channels
+        z = z.view(z.shape[0], out_channels, group, z.shape[2], z.shape[3]).mean(dim=2)
+
+    return z.contiguous()
+
+
 class CLIPPenultimateEncoder(nn.Module):
     def __init__(self, name: str):
         super().__init__()
@@ -98,14 +136,36 @@ class CLIPPenultimateEncoder(nn.Module):
         return tokens_to_gap_vector(tokens)
 
     @torch.no_grad()
-    def encode_token_map(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_token_map(
+        self,
+        x: torch.Tensor,
+        compress_channels: int = DEFAULT_TOKEN_MAP_CHANNELS,
+        compress_grid: int = DEFAULT_TOKEN_MAP_GRID,
+    ) -> torch.Tensor:
+        compress_channels = DEFAULT_TOKEN_MAP_CHANNELS if compress_channels is None else compress_channels
+        compress_grid = DEFAULT_TOKEN_MAP_GRID if compress_grid is None else compress_grid
         tokens = extract_clip_visual_tokens(self.model, x)
-        return tokens_to_patch_map(tokens)
+        patch_map = tokens_to_patch_map(tokens)
+        return compress_token_map(
+            patch_map,
+            out_channels=compress_channels,
+            out_grid=compress_grid,
+        )
 
     @torch.no_grad()
-    def encode_latent(self, x: torch.Tensor, latent_kind: str = "cls") -> torch.Tensor:
+    def encode_latent(
+        self,
+        x: torch.Tensor,
+        latent_kind: str = "cls",
+        token_map_channels: int = DEFAULT_TOKEN_MAP_CHANNELS,
+        token_map_grid: int = DEFAULT_TOKEN_MAP_GRID,
+    ) -> torch.Tensor:
         if latent_kind == "token_map":
-            return self.encode_token_map(x)
+            return self.encode_token_map(
+                x,
+                compress_channels=token_map_channels,
+                compress_grid=token_map_grid,
+            )
         if latent_kind == "gap":
             return self.encode_gap_pooled(x)
         if latent_kind == "cls":
@@ -121,11 +181,17 @@ class CLIPPenultimateEncoder(nn.Module):
         return int(z.shape[-1])
 
     @torch.no_grad()
-    def infer_token_map_shape(self):
+    def infer_token_map_shape(
+        self,
+        compress_channels: int = DEFAULT_TOKEN_MAP_CHANNELS,
+        compress_grid: int = DEFAULT_TOKEN_MAP_GRID,
+    ):
         device = next(self.model.parameters()).device
         size = clip_input_size(self.name)
         dummy = torch.zeros(1, 3, size, size, device=device)
-        z = self.encode_token_map(dummy)
+        compress_channels = DEFAULT_TOKEN_MAP_CHANNELS if compress_channels is None else compress_channels
+        compress_grid = DEFAULT_TOKEN_MAP_GRID if compress_grid is None else compress_grid
+        z = self.encode_token_map(dummy, compress_channels=compress_channels, compress_grid=compress_grid)
         return int(z.shape[1]), int(z.shape[-1])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -220,7 +286,7 @@ class TokenMapRectifierCNN(nn.Module):
         for block in self.blocks:
             h = block(h)
         h = self.output_norm(h)
-        h = torch.nn.functional.gelu(h)
+        h = F.gelu(h)
         delta = self.output_proj(h)
         if self.residual:
             return z + delta
