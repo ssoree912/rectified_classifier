@@ -9,8 +9,9 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from dataset.latent_rectify_dataset import LatentRectifyDataset
 from dataset.sr_rectify_dataset import SRRectifyDataset
-from models.latent_rectifier import CLIPPenultimateEncoder, LatentRectifierMLP, clip_input_size
+from models.latent_rectifier import CLIPPenultimateEncoder, LatentRectifierMLP, TokenMapRectifierCNN, clip_input_size
 
 try:
     import wandb
@@ -23,21 +24,25 @@ CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(1, 3, 1, 1)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train latent rectifier: E(SR(D(x))) -> E(x)")
-    parser.add_argument("--img_dir", type=str, required=True, help="Directory with original training images")
-    parser.add_argument("--sr_cache_root", type=str, required=True, help="Root of precomputed SR(D(x)) cache")
+    parser = argparse.ArgumentParser(description="Train latent rectifier on CLIP latents")
+    parser.add_argument("--img_dir", type=str, default=None, help="Directory with original training images")
+    parser.add_argument("--sr_cache_root", type=str, default=None, help="Root of precomputed SR image cache")
+    parser.add_argument("--clean_latent_root", type=str, default=None, help="Optional root of precomputed clean latents")
+    parser.add_argument("--sr_latent_root", type=str, default=None, help="Optional root of precomputed SR latents")
     parser.add_argument("--save_path", type=str, default="latent_rectifier_latest.pth")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint path to resume from")
     parser.add_argument("--resume_epoch", type=int, default=None, help="Resume from the checkpoint saved at the end of this 1-based epoch number")
     parser.add_argument("--arch", type=str, default="ViT-L/14", help="CLIP backbone used to define the latent space")
     parser.add_argument("--image_size", type=int, default=0, help="Input resize for paired images; <=0 uses the CLIP default size")
+    parser.add_argument("--latent_kind", type=str, choices=["cls", "gap", "token_map"], default="cls")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--hidden_dim", type=int, default=2048)
-    parser.add_argument("--depth", type=int, default=3)
+    parser.add_argument("--hidden_dim", type=int, default=128, help="Hidden width for the latent rectifier")
+    parser.add_argument("--depth", type=int, default=4, help="Rectifier depth")
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--loss", type=str, choices=["l1", "mse"], default="l1")
     parser.add_argument("--save_every", type=int, default=1, help="Save an epoch checkpoint every N epochs")
     parser.add_argument("--save_every_steps", type=int, default=0, help="Update the latest checkpoint every N optimization steps; <=0 disables step checkpoints")
@@ -50,9 +55,9 @@ def parse_args():
         type=str,
         nargs="+",
         default=None,
-        help="Only train on images whose path contains one of these substrings.",
+        help="Only train on samples whose relative path contains one of these substrings.",
     )
-    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights and Biases logging")
     parser.add_argument("--wandb_project", type=str, default="rectified-classifier")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_run_name", type=str, default=None)
@@ -97,6 +102,15 @@ def resolve_resume_path(args, save_path: Path):
     return None
 
 
+def peek_checkpoint_meta(resume_path: Path):
+    if resume_path is None or not resume_path.exists():
+        return {}
+    checkpoint = torch.load(resume_path, map_location="cpu")
+    if isinstance(checkpoint, dict):
+        return checkpoint
+    return {}
+
+
 def build_loader(dataset, args, device: str, epoch: int):
     generator = torch.Generator()
     generator.manual_seed(args.seed + epoch)
@@ -114,7 +128,7 @@ def build_loader(dataset, args, device: str, epoch: int):
     return DataLoader(dataset, **loader_kwargs)
 
 
-def build_checkpoint_state(rectifier, optimizer, scaler, args, next_epoch, next_step_in_epoch, global_step, wandb_run, feature_dim):
+def build_checkpoint_state(rectifier, optimizer, scaler, args, next_epoch, next_step_in_epoch, global_step, wandb_run, feature_dim, grid_size, data_mode, rectifier_kind, latent_kind):
     state = {
         "model_state": rectifier.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -122,6 +136,10 @@ def build_checkpoint_state(rectifier, optimizer, scaler, args, next_epoch, next_
         "next_step_in_epoch": next_step_in_epoch,
         "global_step": global_step,
         "feature_dim": feature_dim,
+        "grid_size": grid_size,
+        "data_mode": data_mode,
+        "rectifier_kind": rectifier_kind,
+        "latent_kind": latent_kind,
         "args": vars(args),
         "wandb_run_id": getattr(wandb_run, "id", None),
         "wandb_run_name": getattr(wandb_run, "name", None),
@@ -167,7 +185,11 @@ def load_resume_checkpoint(resume_path: Path, rectifier, optimizer, scaler, devi
         "global_step": 0,
         "wandb_run_id": None,
         "wandb_run_name": None,
-        "feature_dim": rectifier.input_dim,
+        "feature_dim": getattr(rectifier, "input_dim", None),
+        "grid_size": 1,
+        "data_mode": "image_pair",
+        "rectifier_kind": "mlp",
+        "latent_kind": "cls",
     }
 
 
@@ -182,7 +204,7 @@ def format_timestamp(unix_seconds: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(unix_seconds))
 
 
-def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resume_path=None, resume_id=None, run_name=None, feature_dim=None):
+def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resume_path=None, resume_id=None, run_name=None, feature_dim=None, grid_size=None, data_mode=None, rectifier_kind=None, latent_kind=None):
     if not args.wandb:
         return None
     if wandb is None:
@@ -203,8 +225,11 @@ def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resum
         config={
             "img_dir": args.img_dir,
             "sr_cache_root": args.sr_cache_root,
+            "clean_latent_root": args.clean_latent_root,
+            "sr_latent_root": args.sr_latent_root,
             "arch": args.arch,
             "image_size": args.image_size,
+            "latent_kind": latent_kind,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
             "prefetch_factor": args.prefetch_factor,
@@ -212,6 +237,7 @@ def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resum
             "epochs": args.epochs,
             "hidden_dim": args.hidden_dim,
             "depth": args.depth,
+            "dropout": args.dropout,
             "loss": args.loss,
             "save_every": args.save_every,
             "save_every_steps": args.save_every_steps,
@@ -223,6 +249,9 @@ def init_wandb(args, device: str, dataset_size: int, steps_per_epoch: int, resum
             "resume_epoch": args.resume_epoch,
             "disable_tqdm": args.disable_tqdm,
             "feature_dim": feature_dim,
+            "grid_size": grid_size,
+            "data_mode": data_mode,
+            "rectifier_kind": rectifier_kind,
         },
     )
     if resume_id:
@@ -244,11 +273,62 @@ def compute_loss(pred: torch.Tensor, target: torch.Tensor, loss_name: str) -> to
     return F.l1_loss(pred, target)
 
 
-def main():
-    args = parse_args()
+def resolve_training_data(args):
+    using_cached_latents = args.clean_latent_root is not None or args.sr_latent_root is not None
+    if using_cached_latents:
+        if not args.clean_latent_root or not args.sr_latent_root:
+            raise ValueError("Use both --clean_latent_root and --sr_latent_root together.")
+        dataset = LatentRectifyDataset(
+            clean_latent_root=args.clean_latent_root,
+            sr_latent_root=args.sr_latent_root,
+            include_path_contains=args.path_contains,
+        )
+        feature_dim = dataset.feature_dim
+        grid_size = dataset.grid_size
+        latent_kind = dataset.latent_kind
+        rectifier_kind = "token_map_cnn" if dataset.is_spatial else "mlp"
+        return dataset, None, feature_dim, grid_size, "cached_latent", latent_kind, rectifier_kind
+
+    if not args.img_dir or not args.sr_cache_root:
+        raise ValueError("Image-pair mode requires both --img_dir and --sr_cache_root.")
     if args.image_size <= 0:
         args.image_size = clip_input_size(args.arch)
 
+    dataset = SRRectifyDataset(
+        args.img_dir,
+        image_size=args.image_size,
+        sr_cache_root=args.sr_cache_root,
+        include_path_contains=args.path_contains,
+    )
+    encoder = CLIPPenultimateEncoder(args.arch)
+    if args.latent_kind == "token_map":
+        feature_dim, grid_size = encoder.infer_token_map_shape()
+        rectifier_kind = "token_map_cnn"
+    else:
+        feature_dim = encoder.infer_feature_dim()
+        grid_size = 1
+        rectifier_kind = "mlp"
+    return dataset, encoder, feature_dim, grid_size, "image_pair", args.latent_kind, rectifier_kind
+
+
+def build_rectifier(rectifier_kind: str, feature_dim: int, hidden_dim: int, depth: int, dropout: float):
+    if rectifier_kind == "token_map_cnn":
+        return TokenMapRectifierCNN(
+            input_dim=feature_dim,
+            hidden_dim=hidden_dim,
+            depth=depth,
+            dropout=dropout,
+        )
+    return LatentRectifierMLP(
+        input_dim=feature_dim,
+        hidden_dim=hidden_dim,
+        depth=depth,
+        dropout=dropout,
+    )
+
+
+def main():
+    args = parse_args()
     device = resolve_device(args.device)
     use_cuda = device.startswith("cuda")
     use_amp = use_cuda
@@ -258,26 +338,30 @@ def main():
 
     save_path = Path(args.save_path).resolve()
     resume_path = resolve_resume_path(args, save_path)
+    resume_meta = peek_checkpoint_meta(resume_path)
 
-    dataset = SRRectifyDataset(
-        args.img_dir,
-        image_size=args.image_size,
-        sr_cache_root=args.sr_cache_root,
-        include_path_contains=args.path_contains,
-    )
+    dataset, encoder, feature_dim, grid_size, data_mode, latent_kind, rectifier_kind = resolve_training_data(args)
+    if encoder is not None:
+        encoder = encoder.to(device)
+        encoder.eval()
+
+    if isinstance(resume_meta, dict) and resume_meta:
+        feature_dim = int(resume_meta.get("feature_dim", feature_dim))
+        grid_size = int(resume_meta.get("grid_size", grid_size)) if resume_meta.get("grid_size") is not None else grid_size
+        latent_kind = resume_meta.get("latent_kind", latent_kind)
+        rectifier_kind = resume_meta.get("rectifier_kind", rectifier_kind)
+        data_mode = resume_meta.get("data_mode", data_mode)
 
     base_loader = build_loader(dataset, args, device=device, epoch=0)
     steps_per_epoch = len(base_loader)
     del base_loader
 
-    encoder = CLIPPenultimateEncoder(args.arch).to(device)
-    encoder.eval()
-    feature_dim = encoder.infer_feature_dim()
-
-    rectifier = LatentRectifierMLP(
-        input_dim=feature_dim,
+    rectifier = build_rectifier(
+        rectifier_kind=rectifier_kind,
+        feature_dim=feature_dim,
         hidden_dim=args.hidden_dim,
         depth=args.depth,
+        dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(rectifier.parameters(), lr=args.lr)
     scaler = GradScaler(enabled=use_amp)
@@ -298,16 +382,30 @@ def main():
         resume_wandb_id = ckpt.get("wandb_run_id")
         resume_wandb_name = ckpt.get("wandb_run_name")
         feature_dim = int(ckpt.get("feature_dim", feature_dim))
+        grid_size = int(ckpt.get("grid_size", grid_size)) if ckpt.get("grid_size") is not None else grid_size
+        data_mode = ckpt.get("data_mode", data_mode)
+        rectifier_kind = ckpt.get("rectifier_kind", rectifier_kind)
+        latent_kind = ckpt.get("latent_kind", latent_kind)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[LatentRectifier] device={device}")
     print(f"[LatentRectifier] amp={use_amp}")
+    print(f"[LatentRectifier] data_mode={data_mode}")
     print(f"[LatentRectifier] arch={args.arch}")
     print(f"[LatentRectifier] image_size={args.image_size}")
+    print(f"[LatentRectifier] latent_kind={latent_kind}")
+    print(f"[LatentRectifier] rectifier_kind={rectifier_kind}")
     print(f"[LatentRectifier] feature_dim={feature_dim}")
-    print(f"[LatentRectifier] img_dir={Path(args.img_dir).resolve()}")
-    print(f"[LatentRectifier] sr_cache_root={Path(args.sr_cache_root).resolve()}")
+    print(f"[LatentRectifier] grid_size={grid_size}")
+    if args.img_dir:
+        print(f"[LatentRectifier] img_dir={Path(args.img_dir).resolve()}")
+    if args.sr_cache_root:
+        print(f"[LatentRectifier] sr_cache_root={Path(args.sr_cache_root).resolve()}")
+    if args.clean_latent_root:
+        print(f"[LatentRectifier] clean_latent_root={Path(args.clean_latent_root).resolve()}")
+    if args.sr_latent_root:
+        print(f"[LatentRectifier] sr_latent_root={Path(args.sr_latent_root).resolve()}")
     print(f"[LatentRectifier] dataset_size={len(dataset)}")
     print(f"[LatentRectifier] steps_per_epoch={steps_per_epoch}")
     print(f"[LatentRectifier] save_path={save_path}")
@@ -330,6 +428,10 @@ def main():
         resume_id=resume_wandb_id,
         run_name=resume_wandb_name,
         feature_dim=feature_dim,
+        grid_size=grid_size,
+        data_mode=data_mode,
+        rectifier_kind=rectifier_kind,
+        latent_kind=latent_kind,
     )
 
     try:
@@ -348,19 +450,26 @@ def main():
                 disable=args.disable_tqdm,
                 mininterval=10.0,
             )
-            for step, (x, x_sr) in enumerate(pbar, start=1):
+            for step, batch in enumerate(pbar, start=1):
                 if step <= step_offset:
                     continue
 
-                x = x.to(device, non_blocking=True)
-                x_sr = x_sr.to(device, non_blocking=True)
-                x_clip = normalize_for_clip(x)
-                x_sr_clip = normalize_for_clip(x_sr)
-
-                with torch.no_grad():
-                    with autocast(enabled=use_amp):
-                        z_all = encoder.encode_penultimate(torch.cat([x_clip, x_sr_clip], dim=0))
-                        z, z_sr = z_all.chunk(2, dim=0)
+                if data_mode == "cached_latent":
+                    z, z_sr = batch
+                    z = z.to(device, non_blocking=True)
+                    z_sr = z_sr.to(device, non_blocking=True)
+                else:
+                    x, x_sr = batch
+                    x = x.to(device, non_blocking=True)
+                    x_sr = x_sr.to(device, non_blocking=True)
+                    x_clip = normalize_for_clip(x)
+                    x_sr_clip = normalize_for_clip(x_sr)
+                    with torch.no_grad():
+                        with autocast(enabled=use_amp):
+                            z_all = encoder.encode_latent(torch.cat([x_clip, x_sr_clip], dim=0), latent_kind=latent_kind)
+                            z, z_sr = z_all.chunk(2, dim=0)
+                    z = z.float()
+                    z_sr = z_sr.float()
 
                 optimizer.zero_grad(set_to_none=True)
                 with autocast(enabled=use_amp):
@@ -429,6 +538,10 @@ def main():
                         global_step,
                         wandb_run,
                         feature_dim,
+                        grid_size,
+                        data_mode,
+                        rectifier_kind,
+                        latent_kind,
                     )
                     save_latest_checkpoint(save_path, latest_state)
                     print(f"[Checkpoint] updated latest: {save_path} (epoch={epoch + 1}, step={step}, global_step={global_step})")
@@ -458,6 +571,10 @@ def main():
                 global_step,
                 wandb_run,
                 feature_dim,
+                grid_size,
+                data_mode,
+                rectifier_kind,
+                latent_kind,
             )
             save_latest_checkpoint(save_path, latest_state)
 

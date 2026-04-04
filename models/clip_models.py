@@ -1,13 +1,21 @@
-from .clip import clip
-from PIL import Image
-import torch.nn as nn
-import torch
 import os
-from models.transformer_attention import TransformerAttention
+
+from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms.functional as TF
-from .clip.model import VisionTransformer
-from .mlp import MLP
-from .latent_rectifier import clip_input_size
+
+from .clip import clip
+from models.transformer_attention import TransformerAttention
+from .latent_rectifier import (
+    clip_input_size,
+    extract_clip_visual_tokens,
+    tokens_to_cls_vector,
+    tokens_to_gap_vector,
+    tokens_to_patch_map,
+)
+
 
 CHANNELS = {
     "RN50": 1024,
@@ -28,11 +36,8 @@ STD = {
 
 
 class CLIPModel(nn.Module):
-    """UFD"""
-
     def __init__(self, name, num_classes=1):
         super(CLIPModel, self).__init__()
-
         self.model, self.preprocess = clip.load(name, device="cpu")
         self.fc = nn.Linear(CHANNELS[name], num_classes)
 
@@ -46,7 +51,6 @@ class CLIPModel(nn.Module):
 class CLIPModelPenultimateLayer(nn.Module):
     def __init__(self, name, num_classes=1):
         super(CLIPModelPenultimateLayer, self).__init__()
-
         self.model, self.preprocess = clip.load(name, device="cpu")
         self.register_hook()
         self.fc = nn.Linear(CHANNELS[name + "-penultimate"], num_classes)
@@ -176,10 +180,16 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
                 tensors.append(TF.to_tensor(img.convert("RGB")))
         x_sr = torch.stack(tensors, dim=0).to(device=device, dtype=dtype)
         if x_sr.shape[-2:] != target_hw:
-            x_sr = torch.nn.functional.interpolate(
-                x_sr, size=target_hw, mode="bilinear", align_corners=False
-            )
+            x_sr = F.interpolate(x_sr, size=target_hw, mode="bilinear", align_corners=False)
         return x_sr.clamp(0.0, 1.0)
+
+    @torch.no_grad()
+    def _encode_penultimate_vector(self, x):
+        _ = self.model.encode_image(x)
+        feat = self.features
+        if feat.ndim == 3:
+            feat = feat[:, 0, :]
+        return feat
 
     @torch.no_grad()
     def _make_delta(self, x):
@@ -209,19 +219,11 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
         delta = torch.abs(x_sr - x_hat).clamp(0.0, 1.0)
         return self._to_clip_space(delta).to(dtype=x.dtype)
 
-    @torch.no_grad()
-    def _encode_penultimate(self, x):
-        _ = self.model.encode_image(x)
-        feat = self.features
-        if feat.ndim == 3:
-            feat = feat[:, 0, :]
-        return feat
-
     def forward(self, x, return_feature=False):
         with torch.no_grad():
             delta = self._make_delta(x)
-            f_orig = self._encode_penultimate(x).float()
-            f_delta = self._encode_penultimate(delta).float()
+            f_orig = self._encode_penultimate_vector(x).float()
+            f_delta = self._encode_penultimate_vector(delta).float()
         self.current_paths = None
         view_features = torch.stack([f_orig, f_delta], dim=1)
         fused = self.attention_head(view_features)
@@ -231,12 +233,6 @@ class CLIPModelRectifyDiscrepancyAttention(nn.Module):
 
 
 class CLIPModelLatentRectifyAttention(CLIPModelRectifyDiscrepancyAttention):
-    """
-    Two-view attention classifier in latent space:
-      1) original CLIP penultimate feature
-      2) latent discrepancy or rectified latent derived from SR(D(x))
-    """
-
     def __init__(
         self,
         name,
@@ -244,6 +240,7 @@ class CLIPModelLatentRectifyAttention(CLIPModelRectifyDiscrepancyAttention):
         latent_rectifier=None,
         input_is_clip_normalized=True,
         freeze_rectifier=True,
+        latent_kind="cls",
         latent_view_mode="delta",
     ):
         super().__init__(
@@ -254,9 +251,25 @@ class CLIPModelLatentRectifyAttention(CLIPModelRectifyDiscrepancyAttention):
             freeze_rectifier=False,
         )
         self.latent_rectifier = None
+        self.latent_kind = latent_kind
         self.latent_view_mode = latent_view_mode
         if latent_rectifier is not None:
             self.set_latent_rectify_modules(latent_rectifier, freeze_rectifier=freeze_rectifier)
+
+    @torch.no_grad()
+    def _encode_latent(self, x):
+        tokens = extract_clip_visual_tokens(self.model, x)
+        if self.latent_kind == "token_map":
+            return tokens_to_patch_map(tokens)
+        if self.latent_kind == "gap":
+            return tokens_to_gap_vector(tokens)
+        return tokens_to_cls_vector(tokens)
+
+    @staticmethod
+    def _as_feature(z):
+        if z.ndim == 4:
+            return F.adaptive_avg_pool2d(z, output_size=1).flatten(1)
+        return z
 
     def set_latent_rectify_modules(self, rectifier, freeze_rectifier=True):
         self.latent_rectifier = rectifier.to(self.clip_mean.device)
@@ -267,17 +280,12 @@ class CLIPModelLatentRectifyAttention(CLIPModelRectifyDiscrepancyAttention):
 
     @torch.no_grad()
     def _make_latent_views(self, x):
-        if self.latent_rectifier is None:
-            raise RuntimeError("latent rectifier must be set before forward().")
         if self.sr_cache_root is None or self.sr_cache_input_root is None:
             raise RuntimeError(
                 "SR cache is required. Set --sr_cache_root and --sr_cache_input_root."
             )
         if self.current_paths is None or len(self.current_paths) != x.shape[0]:
             raise RuntimeError("Current image paths are required to resolve SR cache.")
-
-        if next(self.latent_rectifier.parameters()).device != x.device:
-            self.latent_rectifier = self.latent_rectifier.to(x.device)
 
         x_img = self._to_image_space(x)
         x_sr = self._load_cached_sr_batch(
@@ -290,17 +298,30 @@ class CLIPModelLatentRectifyAttention(CLIPModelRectifyDiscrepancyAttention):
             raise RuntimeError("Missing SR cache file for one or more images in batch.")
 
         x_sr_clip = self._to_clip_space(x_sr).to(dtype=x.dtype)
-        f_orig = self._encode_penultimate(x).float()
-        f_sr = self._encode_penultimate(x_sr_clip).float()
-        f_hat = self.latent_rectifier(f_sr.float()).float()
+        z_orig = self._encode_latent(x).float()
+        z_sr = self._encode_latent(x_sr_clip).float()
 
-        if self.latent_view_mode == "rectified":
-            second = f_hat
-        elif self.latent_view_mode == "sr":
-            second = f_sr
+        mode = self.latent_view_mode
+        if mode == "sr":
+            aux = z_sr
         else:
-            second = torch.abs(f_sr - f_hat)
-        return f_orig, second
+            if self.latent_rectifier is None:
+                raise RuntimeError(
+                    "latent rectifier must be set before forward() for the selected latent_view_mode."
+                )
+            if next(self.latent_rectifier.parameters()).device != x.device:
+                self.latent_rectifier = self.latent_rectifier.to(x.device)
+            z_hat = self.latent_rectifier(z_sr).float()
+
+            if mode in {"delta", "orig_minus_rectified"}:
+                aux = z_orig - z_hat
+            elif mode == "rectified":
+                aux = z_hat
+            elif mode == "sr_minus_rectified":
+                aux = z_sr - z_hat
+            else:
+                raise ValueError(f"Unsupported latent_view_mode: {mode}")
+        return self._as_feature(z_orig), self._as_feature(aux)
 
     def forward(self, x, return_feature=False):
         with torch.no_grad():

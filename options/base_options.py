@@ -13,9 +13,16 @@ class BaseOptions():
         parser.add_argument('--patch_base', action='store_true', default=False)
         parser.add_argument('--rectifier_ckpt', type=str, default=None, help='path to trained rectifier checkpoint')
         parser.add_argument('--rectifier_mode', type=str, default='pixel', choices=['pixel', 'latent'], help='rectifier operating space')
-        parser.add_argument('--latent_view_mode', type=str, default='delta', choices=['delta', 'rectified', 'sr'], help='which latent view to pair with the original latent for attention')
-        parser.add_argument('--latent_hidden_dim', type=int, default=2048, help='fallback hidden size when loading latent rectifier checkpoints without metadata')
-        parser.add_argument('--latent_depth', type=int, default=3, help='fallback depth when loading latent rectifier checkpoints without metadata')
+        parser.add_argument('--latent_kind', type=str, default='cls', choices=['cls', 'gap', 'token_map'], help='which CLIP latent representation to use')
+        parser.add_argument(
+            '--latent_view_mode',
+            type=str,
+            default='delta',
+            choices=['delta', 'sr', 'rectified', 'orig_minus_rectified', 'sr_minus_rectified'],
+            help='which latent view to pair with the original latent for attention',
+        )
+        parser.add_argument('--latent_hidden_dim', type=int, default=128, help='fallback hidden size when loading latent rectifier checkpoints without metadata')
+        parser.add_argument('--latent_depth', type=int, default=4, help='fallback depth when loading latent rectifier checkpoints without metadata')
         parser.add_argument('--sr_model_name', type=str, default='RealESRGAN_x4plus', help='Real-ESRGAN model name')
         parser.add_argument('--sr_scale', type=int, default=4, help='SR scale factor')
         parser.add_argument('--sr_tile', type=int, default=512, help='SR tile size for Real-ESRGAN')

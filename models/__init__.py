@@ -52,6 +52,7 @@ def get_model(opt):
             if getattr(opt, "rectifier_mode", "pixel") == "latent":
                 return CLIPModelLatentRectifyAttention(
                     name[5:],
+                    latent_kind=getattr(opt, "latent_kind", "cls"),
                     latent_view_mode=getattr(opt, "latent_view_mode", "delta"),
                 )
             return CLIPModelRectifyDiscrepancyAttention(name[5:])

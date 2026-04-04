@@ -74,19 +74,25 @@ class Trainer(BaseModel):
         if not has_pixel and not has_latent:
             return
 
-        if self.opt.rectifier_ckpt is None:
-            raise ValueError(
-                "rectifier_ckpt is required for discrepancy attention model. "
-                "Set --rectifier_ckpt /path/to/rectifier.pth"
-            )
         if self.opt.sr_cache_root is None or self.opt.sr_cache_input_root is None:
             raise ValueError(
                 "SR cache is required. Set both --sr_cache_root and --sr_cache_input_root."
             )
 
         if getattr(self.opt, "rectifier_mode", "pixel") == "latent":
-            self._attach_latent_rectifier()
+            if self.opt.rectifier_ckpt is not None:
+                self._attach_latent_rectifier()
+            elif getattr(self.opt, "latent_view_mode", "delta") != "sr":
+                raise ValueError(
+                    "rectifier_ckpt is required unless --latent_view_mode sr is used. "
+                    "Set --rectifier_ckpt /path/to/rectifier.pth"
+                )
         else:
+            if self.opt.rectifier_ckpt is None:
+                raise ValueError(
+                    "rectifier_ckpt is required for discrepancy attention model. "
+                    "Set --rectifier_ckpt /path/to/rectifier.pth"
+                )
             self._attach_pixel_rectifier()
 
         if hasattr(self.model, "set_sr_cache"):
@@ -129,16 +135,18 @@ class Trainer(BaseModel):
         self.rectifier, meta = build_latent_rectifier_from_checkpoint(
             checkpoint,
             input_dim=input_dim,
-            hidden_dim=None,
-            depth=None,
+            hidden_dim=getattr(self.opt, "latent_hidden_dim", 128),
+            depth=getattr(self.opt, "latent_depth", 4),
         )
         self.rectifier.to(device).eval()
         self.model.set_latent_rectify_modules(self.rectifier, freeze_rectifier=True)
         if hasattr(self.model, "latent_view_mode"):
             self.model.latent_view_mode = getattr(self.opt, "latent_view_mode", "delta")
+        if hasattr(self.model, "latent_kind"):
+            self.model.latent_kind = getattr(self.opt, "latent_kind", checkpoint.get("latent_kind", "cls"))
         print(
             f"Attached latent-space rectifier from: {self.opt.rectifier_ckpt} "
-            f"(input_dim={meta['input_dim']}, hidden_dim={meta['hidden_dim']}, depth={meta['depth']}, view={getattr(self.opt, 'latent_view_mode', 'delta')})"
+            f"(input_dim={meta['input_dim']}, hidden_dim={meta['hidden_dim']}, depth={meta['depth']}, kind={getattr(self.model, 'latent_kind', 'cls')}, view={getattr(self.opt, 'latent_view_mode', 'delta')})"
         )
 
     def adjust_learning_rate(self, min_lr=1e-6):

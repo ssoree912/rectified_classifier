@@ -12,11 +12,24 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--save_epoch_freq', type=int, default=1, help='frequency of saving checkpoints at the end of epochs')
         parser.add_argument('--epoch_count', type=int, default=1, help='the starting epoch count, we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>, ...')
         parser.add_argument('--last_epoch', type=int, default=-1, help='starting epoch count for scheduler intialization')
+        parser.add_argument('--dataset_root', type=str, default='/workspace/hd/data/rine', help='dataset root that contains split folders such as train and val')
+        parser.add_argument('--train_root', type=str, default=None, help='optional explicit root for training split; overrides dataset_root/train_split')
+        parser.add_argument('--val_root', type=str, default=None, help='optional explicit root for validation split; overrides dataset_root/val_split')
         parser.add_argument('--train_split', type=str, default='train', help='train, val, test, etc')
         parser.add_argument('--val_split', type=str, default='val', help='train, val, test, etc')
         parser.add_argument('--niter', type=int, default=100, help='total epoches')
         parser.add_argument('--beta1', type=float, default=0.9, help='momentum term of adam')
         parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate for adam')
+        parser.add_argument('--wandb', action='store_true', help='Enable Weights and Biases logging')
+        parser.add_argument('--wandb_project', type=str, default='rectified-classifier')
+        parser.add_argument('--wandb_entity', type=str, default=None)
+        parser.add_argument('--wandb_run_name', type=str, default=None)
+        parser.add_argument(
+            '--wandb_mode',
+            type=str,
+            choices=['auto', 'online', 'offline', 'disabled'],
+            default='auto',
+        )
 
         self.isTrain = True
         return parser
